@@ -6,7 +6,7 @@ You have to run the code in Ubuntu and need docker to setup the environment.
 1. Clone the repo
   ```
   # on terminal A in your host,
-  git clone https://gitlab.cerlab.lan.cmu.edu/roboconstruction/slam/livo_dev/livo_dev.git
+  git clone https://github.com/YuheiSugano4/24785-project.git
   ```
 
 2. Set your UID and GID in /lo_dev/docker/setup.env. You can check your uid and gid in Ubuntu bu using the following command:
@@ -33,7 +33,7 @@ You have to run the code in Ubuntu and need docker to setup the environment.
   cd ros2_ws
   mkdir src
   cd src
-  git clone https://gitlab.cerlab.lan.cmu.edu/roboconstruction/slam/livo_dev/livo_dev.git
+  git clone https://github.com/YuheiSugano4/24785-project.git
   ```
 
 5. Build the ros2 package and launch the package in your container:
@@ -48,6 +48,11 @@ You have to run the code in Ubuntu and need docker to setup the environment.
   Then, a Rviz2 window will pop up. Now that the ros node is waiting for the sensor data published.
 
 6. Play a ros2 bag in another terminal:
+  Put a ros2 bag file in the followin directory in your host
+  ```
+  /home/{YOUR_USERNAME}/data/  # Put the ros2 bag file name in data folder.
+  ```
+
   In your host environment, open a new terminal. Then, command the following:
   ```
   # on terminal B in your host,
