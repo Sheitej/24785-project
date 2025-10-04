@@ -1,0 +1,37 @@
+services:
+  default_service_name: 
+    image: img_${SETUPNAME}_${USER} 
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CPU_PARALLEL: "4"
+        UID: "${UID}"  
+        GID: "${GID}"  
+        USER: "${USER}"  
+
+    entrypoint: /bin/bash
+    user: "${UID}:${GID}"  
+    environment:
+      - DISPLAY=${DISPLAY}
+      - UID=${UID} 
+      - GID=${GID} 
+    volumes:
+      - /etc/localtime:/etc/localtime:ro 
+      - /etc/timezone:/etc/timezone:ro 
+      - /tmp/.X11-unix:/tmp/.X11-unix 
+      - ../sandbox/${USER}:/sandbox/${USER}
+      - /home/${USER}/data:/sandbox/${USER}/data     
+    network_mode: host
+    stdin_open: true
+    tty: true
+    deploy:
+          resources:
+            reservations:
+              devices:
+                - driver: nvidia
+                  count: all
+                  capabilities: [gpu]
+    
+    container_name: cont_${SETUPNAME}_${USER}

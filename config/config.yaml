@@ -1,0 +1,116 @@
+/**:
+  ros__parameters:
+    # imu_topic: "/sim_imu"   # Isaac Sim
+    # lidar_topic: "/sim_lidar/point_cloud"   # Isaac Sim
+    imu_topic: "/automine/imu"   # AutoMine
+    lidar_topic: "/automine/lidar"   # AutoMine
+    # imu_topic: "/imu_raw"   # KITTI
+    # lidar_topic: "/points_raw"   # KITTI
+    sensor: "ouster"    # Isaac Sim, AutoMine
+    # sensor: "velodyne"    # KITTI
+    
+    # world_frame: "map"
+    # sensor_frame: "sensor"
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    imu_frame: "imu_link"
+    lidar_frame: "lidar_link"
+
+    imu_acc_x_limit: 0.5
+    imu_acc_y_limit: 0.2
+    imu_acc_z_limit: 0.4
+
+    frontend_node:
+        # ---- for general ----
+        set_main_process_timer: true # default: true
+
+        # ---- for preprocesing ----
+        scan_line: 32 
+        lidar_min_range: 5.0
+        filter_point_size: 3
+        enable_min_range_filter: false
+
+        # ---- for lidar odometry ----
+        max_iterations: 5
+        max_solver_time_in_seconds: 0.2     # 0.015 in liliom
+        voxel_filter_size: 0.7
+        icp_iteration_num: 10
+        use_liosam_gauss_newton: false
+        use_fastlio_point_plane_residual_param: false
+        build_local_map_from_all_global_map: false
+        
+        # ---- for factor graph ----
+        lidar_correction_noise: 0.01
+        acc_n: 3.9939570888238808e-03          # accelerometer measurement noise standard deviation. #0.2
+        gyr_n: 1.5636343949698187e-03         # gyroscope measurement noise standard deviation.     #0.05
+        acc_w: 6.4356659353532566e-05          # accelerometer bias random work noise standard deviation.  #0.02
+        gyr_w: 3.5640318696367613e-05       # gyroscope bias random work noise standard deviation.     #4.0e-5
+        g_norm: 9.80511    # 0 means you need to provide both imu-camera and laser-camera extrinsic
+        lag: 3.0
+
+    debug:
+        print_imu_forward_propagation_state: false
+        print_get_imu_pose_at_measurement_time: false
+        print_imu_pose_timeline: false
+        print_deskew_pointcloud: false
+        print_initial_guess_lo: false
+        print_relative_transform_lo: false
+        print_num_residuals: false
+        print_point_plane_residual_preparation: false
+        print_scan_imu_time_sync: false
+        print_first_point_in_current_scan: false
+        print_cloud_map_size: false
+
+    init:
+        imu_init_fastlio2: false
+
+    imu:
+        isotropic_scale_calibration_to_G: false
+        enalbe_init_guess_for_lo: false
+
+
+    ## Isaac Sim
+    # # Orientation of lidar frame w.r.t. imu frame
+    # R_imu_lidar: [1.0, 0.0, 0.0,
+    #               0.0, 1.0, 0.0,
+    #               0.0, 0.0, 1.0]
+    # # Translation of lidar frame w.r.t. imu frame
+    # t_imu_lidar: [0.0, 0.0, 0.0]
+
+
+    ## AutoMine OCT-00
+    # Orientation of lidar frame w.r.t. imu frame
+    R_imu_lidar: [9.99991000e-01, -4.00790000e-03, -1.57277000e-03,
+                  4.03242000e-03,  9.99865000e-01,  1.59156000e-02,
+                  1.50877000e-03, -1.59218000e-02,  9.99872000e-01]
+    # Translation of lidar frame w.r.t. imu frame
+    t_imu_lidar: [1.64752937e+00, -1.83728126e-02, 4.37729539e-01]
+
+
+    ## KITTI
+    # # Orientation of lidar frame w.r.t. imu frame
+    # R_imu_lidar: [ 9.99997600e-01, -7.85402700e-04,  2.02440600e-03,
+    #                7.55307100e-04,  9.99889800e-01,  1.48245400e-02,
+    #               -2.03582600e-03, -1.48229800e-02,  9.99888100e-01 ]
+    # # Translation of lidar frame w.r.t. imu frame
+    # t_imu_lidar: [ 8.10543903e-01, -3.07054359e-01, 8.02724058e-01]
+
+
+
+
+    # Always identity in this livo, but explicitly declared for clarity
+    # Orientation of imu frame w.r.t. base_link
+    R_base_imu: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+    # Translation of imu frame w.r.t. base_link
+    t_base_imu: [0.0, 0.0, 0.0]
+
+    # Always identity in this livo, but explicitly declared for clarity
+    # Orientation of odom frame w.r.t. map frame
+    R_map_odom: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+    # Translation of odom frame w.r.t. map frame
+    t_map_odom: [0.0, 0.0, 0.0]

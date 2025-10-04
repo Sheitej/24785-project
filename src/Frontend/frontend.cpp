@@ -1,0 +1,1385 @@
+#include <lo_dev/Frontend/frontend.h>
+
+namespace lo_dev 
+{    
+
+// [TODO]: 
+// change the pkg name and name space (DONE)
+// organize the variable name (DONE)
+// deprecate abs_pose[] and change icpPoseParam
+// put transfromPointstoIMU and world together to the same function
+// figure out why it's slow by doing time analysis
+// check how mutex work
+// debug the error below
+//  [frontend_node-1] terminate called after throwing an instance of 'std::runtime_error'
+//  [frontend_node-1]   what():  PreintegratedImuMeasurements::integrateMeasurement: dt <=0
+// check update and publish pointcloud handling
+// should I clean up downsizefilter??
+
+
+Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options) 
+{
+}
+
+bool Frontend::readParameters()
+{
+    // ---- parameters for general ---- 
+    this->declare_parameter<bool>("frontend_node.set_main_process_timer", false);
+    config_.set_main_process_timer = this->get_parameter("frontend_node.set_main_process_timer").as_bool();
+    RCLCPP_INFO_STREAM(get_logger(), "set_main_process_timer: " << config_.set_main_process_timer);
+
+    // ---- parameters for preprocessing ---- 
+    this->declare_parameter<float>("frontend_node.acc_n", 1e-3);
+    this->declare_parameter<float>("frontend_node.acc_w", 1e-3);
+    this->declare_parameter<float>("frontend_node.gyr_n", 1e-6);
+    this->declare_parameter<float>("frontend_node.gyr_w", 1e-6);
+    this->declare_parameter<float>("frontend_node.g_norm", 9.80511);
+    this->declare_parameter<int>("frontend_node.scan_line", 4);
+    this->declare_parameter<double>("frontend_node.imu_acc_x_limit", 1.0);
+    this->declare_parameter<double>("frontend_node.imu_acc_y_limit", 1.0);
+    this->declare_parameter<double>("frontend_node.imu_acc_z_limit", 1.0);
+    this->declare_parameter<std::string>("frontend_node.sensor", "ouster");
+    this->declare_parameter<double>("frontend_node.lidar_min_range", 2.0);
+    this->declare_parameter<bool>("frontend_node.enable_min_range_filter", true);
+
+    config_.imu_acc_noise = this->get_parameter("frontend_node.acc_n").as_double();
+    config_.imu_acc_bias_noise = this->get_parameter("frontend_node.acc_w").as_double();
+    config_.imu_gyr_noise = this->get_parameter("frontend_node.gyr_n").as_double();
+    config_.imu_gyr_bias_noise = this->get_parameter("frontend_node.gyr_w").as_double();
+    config_.imu_gravity = this->get_parameter("frontend_node.g_norm").as_double();
+    config_.num_scans = this->get_parameter("frontend_node.scan_line").as_int();
+    config_.imu_acc_x_limit = this->get_parameter("frontend_node.imu_acc_x_limit").as_double();
+    config_.imu_acc_y_limit = this->get_parameter("frontend_node.imu_acc_y_limit").as_double();
+    config_.imu_acc_z_limit = this->get_parameter("frontend_node.imu_acc_z_limit").as_double();
+    config_.lidar_min_range = this->get_parameter("frontend_node.lidar_min_range").as_double();
+    config_.enable_min_range_filter = this->get_parameter("frontend_node.enable_min_range_filter").as_bool();
+
+    if (SENSOR == "livox") 
+    {
+        // currently livox sensor is not supported
+        config_.sensor = SensorType::LIVOX;
+    } 
+    else if (SENSOR == "velodyne") 
+    {
+        config_.sensor = SensorType::VELODYNE;
+    }
+    else if (SENSOR == "ouster") 
+    {
+        config_.sensor = SensorType::OUSTER;
+    } 
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "sensor: " << SENSOR);
+    RCLCPP_INFO_STREAM(this->get_logger(), "acc_n: " << config_.imu_acc_noise);
+    RCLCPP_INFO_STREAM(this->get_logger(), "acc_w: " << config_.imu_acc_bias_noise);
+    RCLCPP_INFO_STREAM(this->get_logger(), "gyr_n: " << config_.imu_gyr_noise);
+    RCLCPP_INFO_STREAM(this->get_logger(), "gyr_w: " << config_.imu_gyr_bias_noise);
+    RCLCPP_INFO_STREAM(this->get_logger(), "g_norm: " << config_.imu_gravity);
+    RCLCPP_INFO_STREAM(this->get_logger(), "scan_line: " << config_.num_scans);
+    RCLCPP_INFO_STREAM(this->get_logger(), "imu_acc_x_limit: " << config_.imu_acc_x_limit);
+    RCLCPP_INFO_STREAM(this->get_logger(), "imu_acc_y_limit: " << config_.imu_acc_y_limit);
+    RCLCPP_INFO_STREAM(this->get_logger(), "imu_acc_z_limit: " << config_.imu_acc_z_limit);
+    RCLCPP_INFO_STREAM(this->get_logger(), "lidar_min_range: " << config_.lidar_min_range);
+    RCLCPP_INFO_STREAM(this->get_logger(), "enable_min_range_filter: " << config_.enable_min_range_filter);
+
+
+    // ---- parameters for lidar odometry ---- 
+    this->declare_parameter("frontend_node.max_iterations", 4);
+    this->declare_parameter("frontend_node.max_solver_time_in_seconds", 0.015);
+    this->declare_parameter("frontend_node.voxel_filter_size", 0.4);
+    this->declare_parameter("frontend_node.icp_iteration_num", 10);
+    this->declare_parameter("frontend_node.use_liosam_gauss_newton", false);
+    this->declare_parameter("frontend_node.use_fastlio_point_plane_residual_param", false);
+    this->declare_parameter("frontend_node.build_local_map_from_all_global_map", false);
+
+    config_.max_iterations = this->get_parameter("frontend_node.max_iterations").as_int();
+    config_.max_solver_time_in_seconds = this->get_parameter("frontend_node.max_solver_time_in_seconds").as_double();
+    config_.voxel_filter_size = this->get_parameter("frontend_node.voxel_filter_size").as_double();
+    config_.icp_iteration_num = this->get_parameter("frontend_node.icp_iteration_num").as_int();
+    config_.use_liosam_gauss_newton = this->get_parameter("frontend_node.use_liosam_gauss_newton").as_bool();
+    config_.use_fastlio_point_plane_residual_param = this->get_parameter("frontend_node.use_fastlio_point_plane_residual_param").as_bool();
+    config_.build_local_map_from_all_global_map = this->get_parameter("frontend_node.build_local_map_from_all_global_map").as_bool();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "max_iterations: " << config_.max_iterations);
+    RCLCPP_INFO_STREAM(this->get_logger(), "max_solver_time_in_seconds: " << config_.max_solver_time_in_seconds);
+    RCLCPP_INFO_STREAM(this->get_logger(), "voxel_filter_size: " << config_.voxel_filter_size);
+    RCLCPP_INFO_STREAM(this->get_logger(), "icp_iteration_num: " << config_.icp_iteration_num);
+    RCLCPP_INFO_STREAM(this->get_logger(), "use_liosam_gauss_newton: " << config_.use_liosam_gauss_newton);
+    RCLCPP_INFO_STREAM(this->get_logger(), "use_fastlio_point_plane_residual_param: " << config_.use_fastlio_point_plane_residual_param);
+    RCLCPP_INFO_STREAM(this->get_logger(), "build_local_map_from_all_global_map: " << config_.build_local_map_from_all_global_map);
+
+
+    // ---- parameters for factor graph (currently not implemented and might or might not be used in the future) ---- 
+    this->declare_parameter<float>("frontend_node.lidar_correction_noise",0.01);
+    this->declare_parameter<float>("frontend_node.smooth_factor",0.9);
+    this->declare_parameter<double>("frontend_node.fixed_lag", 2.0);
+
+    config_.lidar_correction_noise = this->get_parameter("frontend_node.lidar_correction_noise").as_double();
+    config_.smooth_factor = this->get_parameter("frontend_node.smooth_factor").as_double();
+    config_.lag = this->get_parameter("frontend_node.fixed_lag").as_double();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "lidar_correction_noise: " << config_.lidar_correction_noise);
+    RCLCPP_INFO_STREAM(this->get_logger(), "smooth_factor: " << config_.smooth_factor);
+    RCLCPP_INFO_STREAM(this->get_logger(), "lag: " << config_.lag);
+
+    return true;
+}
+
+void Frontend::initializeInterface()
+{
+    // get the config parameters
+    if(!readGlobalparam(shared_from_this()))
+    {
+        RCLCPP_ERROR(this->get_logger(), "[lo_dev::Frontend] Could not read calibration. Exiting...");
+        rclcpp::shutdown();
+    }
+
+    if (!readParameters())
+    {
+        RCLCPP_ERROR(this->get_logger(), "[lo_dev::Frontend] Could not read parameters. Exiting...");
+        rclcpp::shutdown();
+    }
+
+    // make sure the number of lidar scan is valid (actually not important but keep this just in case)
+    if (config_.num_scans != 16 && config_.num_scans != 32 && config_.num_scans != 64 && config_.num_scans != 4 && config_.num_scans != 128)
+    {
+        RCLCPP_ERROR(this->get_logger(), "only support velodyne, livox, ouster with 16, 32, 64 or 128 scan line! and livox mid 360");
+        rclcpp::shutdown();
+    }
+    
+    // if a param 'set_main_process_timer' is true, call the main process (run()) in timer 
+    if (config_.set_main_process_timer == true)
+    {
+        mainProcessTimer = this->create_wall_timer(
+            std::chrono::milliseconds(static_cast<int>(1.)), std::bind(&Frontend::run, this));   
+    }
+
+    // set measurement subscriber callback group 'Reentrant' to ensure multi-threading process.
+    rclcpp::CallbackGroup::SharedPtr subCbGr = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    rclcpp::SubscriptionOptions subOpt;
+    subOpt.callback_group = subCbGr;
+    
+    // set ROS2 qos
+    rclcpp::QoS imuQos(10);
+    imuQos.best_effort();  // use BEST_EFFORT reliability
+    imuQos.keep_last(10);  // keep last 10 messages
+
+    rclcpp::QoS lidarQos(10);
+    lidarQos.best_effort();  // use BEST_EFFORT reliability
+    lidarQos.keep_last(2);  // keep last 2 messages
+
+    // initialize point cloud subscriber
+    if (config_.sensor == SensorType::VELODYNE || config_.sensor == SensorType::OUSTER) 
+    {
+        subPointCloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            LIDAR_TOPIC, lidarQos, 
+            std::bind(&Frontend::cloudHandler, this, std::placeholders::_1),
+            subOpt);
+    } 
+    else if (config_.sensor == SensorType::LIVOX) 
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "Currently Livox sensors are not supported.");
+        // Livox point cloud is not currently implemented
+        // subLivoxCloud = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        //     LIDAR_TOPIC, 20, 
+        //     std::bind(&Frontend::cloudHandler, this, std::placeholders::_1), 
+        //     sub_options);
+    }
+    else
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "Input sensor type is not supported.");
+    }
+
+    // initialize imu subscriber
+    subImu_ = this->create_subscription<sensor_msgs::msg::Imu>(
+        IMU_TOPIC, imuQos, 
+        std::bind(&Frontend::imuHandler, this, std::placeholders::_1), 
+        subOpt);
+
+
+    // initialize point cloud and odometry(estimated pose) publisher
+    pubCloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(ProjectName+"/kf/cloud/world/posterior", 2);
+    pubOdom_ = this->create_publisher<nav_msgs::msg::Odometry>(ProjectName+"/kf/odom/world/posterior", 10); // for odometry evaluation
+
+    // initialize ROS2 transform broadcaster just for Rviz visualization
+    rclcpp::TimeSource ts(shared_from_this());
+    ts.attachClock(this->get_clock());
+    tfBuffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tfListener_ = std::make_shared<tf2_ros::TransformListener>(*tfBuffer_, shared_from_this(), false);
+    tfStaticBroadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(shared_from_this());
+    tfBroadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(shared_from_this());
+    tfBroadcastTimer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&Frontend::publishTf, this));   
+    publishStaticTf();
+
+    // initialize variables
+    isImuInitialized_ = false;
+    isCloudMapInitialized_ = false;
+    timePrevScanEnd_ = 0.0;
+    timeCurrScanBeg_ = 0.0;
+    timeCurrScanEnd_ = 0.0;
+    isImuFirstPropagation_ = true;
+    // scan_match_cnt_ = 10;
+    numResidual_ = 0;   
+
+    // initialize imu propagator(integrator)
+    std::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(config_.imu_gravity);
+    p->accelerometerCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_acc_noise,2); // acc white noise in continuous
+    p->gyroscopeCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_gyr_noise,2); // gyro white noise in continuous
+    p->integrationCovariance=gtsam::Matrix33::Identity(3,3)*pow(1e-4,2); // error committed in integrating position from velocities
+    gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6)<<0,0,0,0,0,0).finished());
+    imuPropagator_=std::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias);
+
+    // initialize point cloud container
+    cloudKfWindow_.reset(new pcl::PointCloud<PointType>());
+    cloudMapLocal_.reset(new pcl::PointCloud<PointType>());
+    cloudMapLocalDs_.reset(new pcl::PointCloud<PointType>());
+    kdTreeMapLocal_.reset(new pcl::KdTreeFLANN<PointType>());
+    cloudScanCurr_.reset(new pcl::PointCloud<PointType>());
+    cloudScanCurrDs_.reset(new pcl::PointCloud<PointType>());
+    cloudCurrentScanInWorld_.reset(new pcl::PointCloud<PointType>());
+    pointScanCurrForResidual_.reset(new pcl::PointCloud<PointType>());
+    planeNormDistForResidual_.reset(new pcl::PointCloud<PointType>());
+    const double size = config_.voxel_filter_size;
+    downsizeFilterScanCurr_.setLeafSize(size, size, size);
+    downsizeFilterMapLocal_.setLeafSize(size, size, size); //config_.voxel_filter_size
+
+    // initialize pose variables
+    q_w_bPrevKf_ = Eigen::Quaterniond::Identity();
+    t_w_bPrevKf_ = Eigen::Vector3d::Zero();
+    q_bPrevKf_bCurrKf_lo_ = Eigen::Quaterniond::Identity();
+    t_bPrevKf_bCurrKf_lo_ = Eigen::Vector3d::Zero();
+    q_w_bCurrKf_ = Eigen::Quaterniond::Identity();
+    t_w_bCurrKf_ = Eigen::Vector3d::Zero();
+    q_bPrevKf_bCurrKf_initGuess_ = Eigen::Quaterniond::Identity();
+    t_bPrevKf_bCurrKf_initGuess_ = Eigen::Vector3d::Zero();
+
+    // ---- initialization for factor graph optimization (currently not implemented and might or might not be used in the future) ---- 
+    // key_ = 0;
+    // std::shared_ptr<gtsam::PreintegrationParams> p=gtsam::PreintegrationParams::MakeSharedU(config_.imu_gravity);
+    // p->accelerometerCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_acc_noise,2); // acc white noise in continuous
+    // p->gyroscopeCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_gyr_noise,2); // gyro white noise in continuous
+    // p->integrationCovariance = gtsam::Matrix33::Identity(3,3)*pow(1e-4,2); // error committed in integrating position from velocities, should be a config parameter
+    // gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6)<<0,0,0,0,0,0).finished()); // assume zero initial bias
+    // priorPoseNoise_ = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6)<<1e-2,1e-2,1e-2,1e-2,1e-2,1e-2).finished()); // rad,rad,rad,m,m,m,should be a config parameter
+    // priorVelNoise_ = gtsam::noiseModel::Isotropic::Sigma(3,1e-2);                      // m/s , should be a config parameter
+    // priorBiasNoise_ = gtsam::noiseModel::Isotropic::Sigma(6,1e-3);                    // 1e-2 ~ 1e-3 seems to be good, should be a config parameter
+    // correctionNoise_ = gtsam::noiseModel::Isotropic::Sigma(6, config_.lidar_correction_noise); // meter
+    // noiseModelBetweenBias_ = (gtsam::Vector(6)
+    //         << config_.imu_acc_bias_noise,config_.imu_acc_bias_noise,config_.imu_acc_bias_noise,config_.imu_gyr_bias_noise,config_.imu_gyr_bias_noise,config_.imu_gyr_bias_noise)
+    //         .finished();
+    // imuIntegrator_=std::make_shared<gtsam::PreintegratedImuMeasurements>(p,prior_imu_bias);
+    // fixedLagSmoother_=std::make_shared<gtsam::BatchFixedLagSmoother>(config_.lag);
+    // isSystemInited_ = false;
+    // isFirstSmoothingDone_ = false;
+
+    // initialize process flag
+    isProcessing_.store(false);  // std::atomic_bool isProcessing_; // for process flag avoiding racing in multi-thread
+
+    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+}
+
+void Frontend::synchronizeMeasurements()
+{
+    timeCurrScanBeg_ = rclcpp::Time(cloudMsgBuffer_.front().header.stamp).seconds();
+
+    convertCloudMsgToPcl(cloudMsgBuffer_.front(), cloudKfWindow_);
+    cloudMsgBuffer_.pop_front();
+
+    timeCurrScanEnd_ = timeCurrScanBeg_ + cloudKfWindow_->points.back().curvature; // !! curvature contains measurement time[sec] for a point !!
+
+    for(;;)
+    {
+        if(imuMsgBuffer_.empty())
+            break;
+
+        auto imu = imuMsgBuffer_.front();
+        const double timeImu = rclcpp::Time(imu.header.stamp).seconds();
+
+        // If reach the first imu measurement after the current scan end time,
+        if(timeCurrScanEnd_ < timeImu)
+        {
+            // just add the imu measurement w/o removing it from imuMsgBuffer_,
+            // since it'll be used as the first imu data for the next scan process
+            imuMsgKfWindow_.push_back(imu);
+            break;
+        }
+
+        imuMsgKfWindow_.push_back(imu);
+        imuMsgBuffer_.pop_front();
+    }
+}
+
+void Frontend::convertCloudMsgToPcl(const sensor_msgs::msg::PointCloud2& msgIn, pcl::PointCloud<PointType>::Ptr cloudOut)
+{
+    if (config_.sensor == SensorType::VELODYNE)
+    {
+        pcl::PointCloud<VelodynePointXYZIRT>::Ptr cloudIn;
+        cloudIn.reset(new pcl::PointCloud<VelodynePointXYZIRT>());
+        pcl::fromROSMsg(msgIn, *cloudIn);
+
+        cloudOut->points.resize(cloudIn->size());
+        for (size_t i=0; i<cloudIn->size(); i++)
+        {
+            auto &ptIn = cloudIn->points[i];
+            auto &ptOut = cloudOut->points[i];
+            ptOut.x = ptIn.x;
+            ptOut.y = ptIn.y;
+            ptOut.z = ptIn.z;
+            ptOut.intensity = ptIn.intensity;
+            ptOut.curvature = ptIn.time;  // !! curvature contains time[sec]
+            // discard ring information
+        }
+    }
+    else if (config_.sensor == SensorType::OUSTER)
+    {
+        pcl::PointCloud<OusterPointXYZIRT>::Ptr cloudIn;
+        cloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
+
+        pcl::fromROSMsg(msgIn, *cloudIn);
+
+        cloudOut->points.resize(cloudIn->size());
+        for (size_t i=0; i<cloudIn->size(); i++)
+        {
+            auto &ptIn = cloudIn->points[i];
+            auto &ptOut = cloudOut->points[i];
+            ptOut.x = ptIn.x;
+            ptOut.y = ptIn.y;
+            ptOut.z = ptIn.z;
+            ptOut.intensity = ptIn.intensity;
+            ptOut.curvature = ptIn.t * 1e-9f;  // !! curvature contains time[sec]
+            // discard ring information
+        }
+    }
+    else
+    {
+        RCLCPP_ERROR_STREAM(get_logger(), "Unknown sensor type: " << int(config_.sensor));
+        rclcpp::shutdown();
+    }
+}
+
+void Frontend::initializeImu()
+{
+    // only if setting the param 'init_imu_init_fastlio2', initialize imu gravity vector and covariance
+    if (init_imu_init_fastlio2 == true)
+    {
+        size_t N=1;
+        Eigen::Vector3d acc, gyr;
+
+        for (size_t i=0; i<imuMsgKfWindow_.size(); i++)
+        {
+            sensor_msgs::msg::Imu& imu = imuMsgKfWindow_[i];
+            acc = Eigen::Vector3d(
+                imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z);
+            gyr = Eigen::Vector3d(
+                imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z);
+
+            meanAccInit_ += (acc - meanAccInit_) / N;
+            meanGyrInit_ += (gyr - meanGyrInit_) / N;
+
+            // covariance calculation (if needed)
+            // cov_acc = cov_acc * (N - 1.0) / N + (acc - mean_acc).cwiseProduct(acc - mean_acc) * (N - 1.0) / (N * N);
+            // cov_gyr = cov_gyr * (N - 1.0) / N + (gyr - mean_gyr).cwiseProduct(gyr - mean_gyr) * (N - 1.0) / (N * N);
+            N++;
+        }
+
+        gravInit_ = (-meanAccInit_ / meanAccInit_.norm() * config_.imu_gravity);
+        
+        RCLCPP_INFO_STREAM(get_logger(), "meanAccInit_ = " << meanAccInit_);
+        RCLCPP_INFO_STREAM(get_logger(), "meanGyrInit_ = " << meanGyrInit_);
+        RCLCPP_INFO_STREAM(get_logger(), "gravInit_ = " << gravInit_);
+    }
+}
+
+void Frontend::propagateImu()
+{
+    gtsam::NavState state;  // default constructor initializes zero trans and identity rot state
+    gtsam::imuBias::ConstantBias bias;
+
+    if (isImuFirstPropagation_) // for the first imu propagation,
+    {
+        double timeFirstImu = rclcpp::Time(imuMsgKfWindow_[0].header.stamp).seconds();
+
+        // if the first imu measurement time is later than the beginning time of the first scan, treat the beginning time of the first scan as the first imu measurement time
+        // to avoid an error when interpolating point position based on imu poses
+        if (timeCurrScanBeg_ < timeFirstImu)
+        {
+            imuPoseTimeline_.insert(std::make_pair(timeCurrScanBeg_, state));
+        }
+        else
+        {
+            imuPoseTimeline_.insert(std::make_pair(timeFirstImu, state));
+        }
+
+        isImuFirstPropagation_ = false;
+    }
+    else
+    {
+        // set (previous scan-end time, the previous kf optimized pose at scan-end) as the first imu pose
+        // to carry over the previous state to the current imu propagation
+        getGtsamFromEigen(q_w_bPrevKf_, t_w_bPrevKf_, state);
+        imuPoseTimeline_.insert(std::make_pair(timePrevScanEnd_, state));
+    }
+    // else if(carry_over_state_from_factor_graph) // if factor graph optimization is enabled, carry over the prev state from the graph
+    // {
+    //     // set the posterior state in prev kf from factor graph
+    // }
+
+    if (imuMsgKfWindow_.size() < 1)
+    {
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Keyframe window imu measurements is none. Skip the process.");
+        return;
+    }
+
+    for (size_t i=0; i<imuMsgKfWindow_.size()-1; i++)
+    {
+        // reset imuPropagator_ for the next consecutive 2 imu measurements integration
+        imuPropagator_->resetIntegrationAndSetBias(bias);
+
+        sensor_msgs::msg::Imu& imuPrev = imuMsgKfWindow_[i];
+        sensor_msgs::msg::Imu& imuNext = imuMsgKfWindow_[i+1];
+
+        double tPrev = rclcpp::Time(imuPrev.header.stamp).seconds();
+        double tNext = rclcpp::Time(imuNext.header.stamp).seconds();
+
+        gtsam::Vector3 vecAcc = gtsam::Vector3(
+            imuNext.linear_acceleration.x, imuNext.linear_acceleration.y, imuNext.linear_acceleration.z);
+        gtsam::Vector3 vecGyr = gtsam::Vector3(
+            imuNext.angular_velocity.x, imuNext.angular_velocity.y, imuNext.angular_velocity.z);
+        double dt = tNext - tPrev;
+
+        // if the param is set, calibrate linear acceleration based on the gravity as Fast-lio does
+        if (imu_isotropic_scale_calibration_to_G)
+        {
+            vecAcc = vecAcc * config_.imu_gravity / meanAccInit_.norm();
+        }
+
+        imuPropagator_->integrateMeasurement(vecAcc, vecGyr, dt);
+        // dt is Time interval between this and the last IMU measurement: https://gtsam.org/doxygen/4.0.0/a03463.html#a988e29fd66bb628c2f7669acb21e1eb8
+        // imuAccGyrKfWindow_[0] just serves to provide the time t0, not provide the imu measurement (dropped) due to the function usage of integrateMeasurement()
+
+        state = imuPropagator_->predict(state, bias);
+        imuPoseTimeline_.insert(std::make_pair(tNext, state));
+
+        // for debugging
+        if (debug_print_imu_forward_propagation_state)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "vecAcc: " << vecAcc[0] << ", " << vecAcc[1] << ", " << vecAcc[2]);
+            RCLCPP_INFO_STREAM(get_logger(), "vecGyr: " << vecGyr[0] << ", " << vecGyr[1] << ", " << vecGyr[2]);
+            RCLCPP_INFO_STREAM(get_logger(), "dt: " << dt);
+            RCLCPP_INFO_STREAM(get_logger(), "state: " << state);
+            RCLCPP_INFO_STREAM(get_logger(), "bias: " << bias);
+        }
+        // use gtsam::NavState::update() -> for forward integration: https://gtsam.org/doxygen/4.0.0/a03507.html#a5494db1f41c8a61acc2d63c32b9adc31
+    }
+
+    // for debugging
+    if(debug_print_imu_pose_timeline)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "Print imuPoseTimeline_: ");
+        RCLCPP_INFO_STREAM(get_logger(), "imuPoseTimeline_.size(): " << imuPoseTimeline_.size());
+        for (const auto& [key, value] : imuPoseTimeline_)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "time:"  << std::fixed << key << ", imu state: " << value);
+        }
+        RCLCPP_INFO_STREAM(get_logger(), "Print imuPoseTimeline_ -------- END ");
+    }
+
+}
+
+void Frontend::transformPointCloudInImuFrame()
+{
+    for (auto &point: cloudKfWindow_->points)
+    {
+        Eigen::Vector3d t_l_pt(point.x, point.y, point.z);
+        Eigen::Vector3d t_b_pt;
+        t_b_pt = q_IMU_LIDAR * t_l_pt + t_IMU_LIDAR;
+
+        point.x = t_b_pt.x();
+        point.y = t_b_pt.y();
+        point.z = t_b_pt.z();
+    }
+}
+
+void Frontend::makeInitialGuess()
+{
+    Eigen::Quaterniond q_bKfWdBeg_bKfWdEnd;
+    Eigen::Vector3d t_bKfWdBeg_bKfWdEnd;
+    
+    // if enable the initial guess for LO based on imu, set a transformation
+    if (imu_enalbe_init_guess_for_lo)
+    {
+        Eigen::Quaterniond q_w_bKfWindowBeg;
+        Eigen::Vector3d t_w_bKfWindowBeg;
+        getEigenFromGtsam(imuPoseTimeline_.begin()->second, q_w_bKfWindowBeg, t_w_bKfWindowBeg);
+
+        Eigen::Quaterniond q_w_bKfWindowEnd_;
+        Eigen::Vector3d t_w_bKfWindowEnd_;
+        getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
+        
+        q_bKfWdBeg_bKfWdEnd = (q_w_bKfWindowBeg.inverse() * q_w_bKfWindowEnd_).normalized();
+        t_bKfWdBeg_bKfWdEnd = q_w_bKfWindowBeg.inverse() * (t_w_bKfWindowEnd_ - t_w_bKfWindowBeg);
+        // t_w_bKfWindowEnd_ - t_w_bKfWindowBeg : translation of beg->end in world frame
+        // q_w_bKfWindowBeg.inverse() * {above} = q_bKfWindowBeg_w * {above}
+        //                                      = translation of beg->end in beg frame (OK)
+    }
+    else
+    {
+        q_bKfWdBeg_bKfWdEnd = Eigen::Quaterniond::Identity();
+        t_bKfWdBeg_bKfWdEnd = Eigen::Vector3d::Zero();
+    }
+
+    q_bPrevKf_bCurrKf_initGuess_ = q_bKfWdBeg_bKfWdEnd;
+    t_bPrevKf_bCurrKf_initGuess_ = t_bKfWdBeg_bKfWdEnd;
+
+    // for debugging
+    if(debug_print_initial_guess_lo)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bPrevKf_: " << t_w_bPrevKf_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bPrevKf_: " << q_w_bPrevKf_.coeffs().transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_initGuess_: " << t_bPrevKf_bCurrKf_initGuess_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_initGuess_: " << q_bPrevKf_bCurrKf_initGuess_.coeffs().transpose());
+    }
+}
+
+void Frontend::deskewPointCloud()
+{   
+    Eigen::Quaterniond q_w_bKfWindowEnd_;
+    Eigen::Vector3d t_w_bKfWindowEnd_;
+    getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
+
+    // for debugging
+    if(debug_print_deskew_pointcloud)
+        std::cout << "std::prev(imuPoseTimeline_.end()) -> second = " << std::prev(imuPoseTimeline_.end())->second << std::endl;
+
+    // for debugging
+    if(debug_print_scan_imu_time_sync)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanBeg_ = " << std::fixed << timeCurrScanBeg_);
+        RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_ = " << std::fixed << timeCurrScanEnd_);
+        RCLCPP_INFO_STREAM(get_logger(), "imuPoseTimeline_.begin()->first = " << std::fixed << imuPoseTimeline_.begin()->first);
+        RCLCPP_INFO_STREAM(get_logger(), "std::prev(imuPoseTimeline_.end())->first = " << std::fixed << std::prev(imuPoseTimeline_.end())->first);
+    }
+
+    for (auto &point: cloudKfWindow_->points)
+    {
+        double pointTime = timeCurrScanBeg_ + point.curvature; // !! curvature contains time[sec] !!
+
+        // get an imu pose interpolated based on the point time
+        Eigen::Quaterniond q_w_bPtTime;
+        Eigen::Vector3d t_w_bPtTime;
+        getImuPoseAtPointMeasurementTime(pointTime, q_w_bPtTime, t_w_bPtTime);
+
+        Eigen::Quaterniond q_bKfWindowEnd_bPtTime;
+        Eigen::Vector3d t_bKfWindowEnd_bPtTime;
+        q_bKfWindowEnd_bPtTime = (q_w_bKfWindowEnd_.inverse() * q_w_bPtTime).normalized();
+        t_bKfWindowEnd_bPtTime = q_w_bKfWindowEnd_.inverse() * (t_w_bPtTime - t_w_bKfWindowEnd_);
+
+        Eigen::Vector3d t_bPtTime_pt(point.x, point.y, point.z);
+        Eigen::Vector3d t_bKfWindowEnd_pt;
+        t_bKfWindowEnd_pt = q_bKfWindowEnd_bPtTime * t_bPtTime_pt + t_bKfWindowEnd_bPtTime;
+
+        // for debugging
+        if(debug_print_deskew_pointcloud)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "START DESKEWING - pt: ( " << point.x << ", " << point.y << ", " << point.z << " )");
+            RCLCPP_INFO_STREAM(get_logger(), "t_w_bPtTime = " << t_w_bPtTime.transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "q_w_bPtTime = " << q_w_bPtTime.coeffs().transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "t_w_bKfWindowEnd_ = " << t_w_bKfWindowEnd_.transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "q_w_bKfWindowEnd_ = " << q_w_bKfWindowEnd_.coeffs().transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_bPtTime = " << t_bKfWindowEnd_bPtTime.transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "q_bKfWindowEnd_bPtTime = " << q_bKfWindowEnd_bPtTime.coeffs().transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_pt = " << t_bKfWindowEnd_pt.transpose());
+            RCLCPP_INFO_STREAM(get_logger(), "END DESKEWING   - pt: ( " << t_bKfWindowEnd_pt.x() << ", " << t_bKfWindowEnd_pt.y() << ", " << t_bKfWindowEnd_pt.z() << " )");
+        }
+
+        PointType ptDeskewed;
+        ptDeskewed.x = t_bKfWindowEnd_pt.x();
+        ptDeskewed.y = t_bKfWindowEnd_pt.y();
+        ptDeskewed.z = t_bKfWindowEnd_pt.z();
+        ptDeskewed.curvature = point.curvature;
+        ptDeskewed.intensity = point.intensity;
+
+        if(config_.enable_min_range_filter)
+        {
+            // std::cout << "Store a point that meets the min range filter" << std::endl;
+            const double ptDisSq = ptDeskewed.x*ptDeskewed.x + ptDeskewed.y*ptDeskewed.y + ptDeskewed.z*ptDeskewed.z;
+            const double minThrDisSq = config_.lidar_min_range*config_.lidar_min_range;
+            if(ptDisSq > minThrDisSq)
+            {
+                cloudScanCurr_->points.push_back(ptDeskewed);
+            }
+        }
+        else
+        {
+            cloudScanCurr_->points.push_back(ptDeskewed);
+        }
+    }
+}
+
+void Frontend::getImuPoseAtPointMeasurementTime(double pointTime, Eigen::Quaterniond& qOut, Eigen::Vector3d& tOut)
+{
+    // get iterator for imu time-pose pair right after the point measurement time
+    auto itPoseImuAftPtT = imuPoseTimeline_.upper_bound(pointTime); // iterator for std::map imuPoseTimeline_
+    // get iterator for imu time-pose pair right before the point measurement time
+    auto itPoseImuBefPtT = std::prev(itPoseImuAftPtT); // iterator for std::map imuPoseTimeline_
+
+    double timeRatio = (pointTime - itPoseImuBefPtT->first) / (itPoseImuAftPtT->first - itPoseImuBefPtT->first);
+
+    Eigen::Quaterniond q_w_bAftPtTime;
+    Eigen::Vector3d t_w_bAftPtTime;
+    getEigenFromGtsam(itPoseImuAftPtT->second, q_w_bAftPtTime, t_w_bAftPtTime);
+
+    Eigen::Quaterniond q_w_bBefPtTime;
+    Eigen::Vector3d t_w_bBefPtTime;
+    getEigenFromGtsam(itPoseImuBefPtT->second, q_w_bBefPtTime, t_w_bBefPtTime);
+
+    Eigen::Quaterniond q_w_bInterpolated;
+    Eigen::Vector3d t_w_bInterpolated;
+    q_w_bInterpolated = q_w_bBefPtTime.slerp(timeRatio, q_w_bAftPtTime).normalized();
+    t_w_bInterpolated = (1-timeRatio) * t_w_bBefPtTime + timeRatio * t_w_bAftPtTime;
+    qOut = q_w_bInterpolated;
+    tOut = t_w_bInterpolated;
+
+    // for debugging
+    if (debug_print_get_imu_pose_at_measurement_time)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "pointTime:     " << pointTime);
+        RCLCPP_INFO_STREAM(get_logger(), "PoseImuBefPtT: " << itPoseImuBefPtT->first);
+        RCLCPP_INFO_STREAM(get_logger(), "PoseImuAftPtT: " << itPoseImuAftPtT->first);
+        RCLCPP_INFO_STREAM(get_logger(), "timeRatio:     " << timeRatio);
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bAftPtTime: " << t_w_bAftPtTime.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bAftPtTime: " << q_w_bAftPtTime.coeffs().transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bBefPtTime: " << t_w_bBefPtTime.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bBefPtTime: " << q_w_bBefPtTime.coeffs().transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bInterpolated: " << t_w_bInterpolated.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bInterpolated: " << q_w_bInterpolated.coeffs().transpose());
+    }
+}
+
+void Frontend::initializeCloudMap()
+{
+    RCLCPP_INFO_STREAM(this->get_logger(), "Initializing a global cloud map.");
+    RCLCPP_INFO_STREAM(this->get_logger(), "cloudScanCurr_->points.size() = " << cloudScanCurr_->points.size());
+
+    pcl::PointCloud<PointType>::Ptr cloudInW;
+    cloudInW.reset(new pcl::PointCloud<PointType>());
+    for (auto& pt: cloudScanCurr_->points)
+    {
+        PointType ptInW;
+        transformPointToWorldFrame(pt, ptInW);
+        cloudInW->points.push_back(ptInW);
+    }
+
+    cloudFramesMapGlobal_.push_back(cloudInW);
+}
+
+void Frontend::transformPointToWorldFrame(const PointType&  pi, PointType& po) 
+{
+    // for debugging
+    if (debug_print_get_imu_pose_at_measurement_time)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "Before transformation---");
+        RCLCPP_INFO_STREAM(this->get_logger(), "pi:");
+        RCLCPP_INFO_STREAM(this->get_logger(), "  x: " << pi.x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  y: " << pi.y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  z: " << pi.z);
+        RCLCPP_INFO_STREAM(this->get_logger(), "po:");
+        RCLCPP_INFO_STREAM(this->get_logger(), "  x: " << po.x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  y: " << po.y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  z: " << po.z);
+
+        RCLCPP_INFO_STREAM(this->get_logger(), "q_w_bCurrKf_ = " << q_w_bCurrKf_.coeffs().transpose());
+        RCLCPP_INFO_STREAM(this->get_logger(), "t_w_bCurrKf_ = " << t_w_bCurrKf_.transpose());
+    }
+
+    Eigen::Vector3d ptIn(pi.x, pi.y, pi.z);
+    Eigen::Vector3d ptOut = q_w_bCurrKf_ * ptIn + t_w_bCurrKf_;
+
+    po.x = ptOut.x();
+    po.y = ptOut.y();
+    po.z = ptOut.z();
+    po.intensity = pi.intensity;
+    po.curvature = pi.curvature;
+
+    // for debugging
+    if (debug_print_get_imu_pose_at_measurement_time)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "After transformation---");
+        RCLCPP_INFO_STREAM(this->get_logger(), "pi:");
+        RCLCPP_INFO_STREAM(this->get_logger(), "  x: " << pi.x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  y: " << pi.y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  z: " << pi.z);
+        RCLCPP_INFO_STREAM(this->get_logger(), "po:");
+        RCLCPP_INFO_STREAM(this->get_logger(), "  x: " << po.x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  y: " << po.y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  z: " << po.z);
+    }
+}
+
+void Frontend::setInitialPose()
+{
+    q_w_bPrevKf_.normalize();
+    
+    Eigen::Vector3d t_w_bCurrKf_initGuess = q_w_bPrevKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bPrevKf_;
+    Eigen::Quaterniond q_w_bCurrKf_initGuess = (q_w_bPrevKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
+
+    // for debugging
+    if(debug_print_initial_guess_lo)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "t_w_bCurrKf_initGuess: " << t_w_bCurrKf_initGuess.transpose());
+        RCLCPP_INFO_STREAM(this->get_logger(), "q_w_bCurrKf_initGuess: " << q_w_bCurrKf_initGuess.coeffs().transpose());
+    }
+
+    q_w_bCurrKf_ = q_w_bCurrKf_initGuess;
+    t_w_bCurrKf_ = t_w_bCurrKf_initGuess;
+}
+
+void Frontend::buildLocalMap() 
+{
+    cloudMapLocal_->clear();
+
+    const size_t nCloudInMap = cloudFramesMapGlobal_.size();
+    const size_t maxCloudToTake = 20;
+    const size_t nCloudToTake = std::min(nCloudInMap, maxCloudToTake);
+
+    if(!config_.build_local_map_from_all_global_map) // if extracting all the points to build a local map in the global map
+    {
+        for (size_t i=0; i<nCloudToTake; ++i) 
+        {
+            *cloudMapLocal_ += *cloudFramesMapGlobal_[(nCloudInMap-1) - i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
+        }
+    }
+    else
+    {
+        for (size_t i=0; i<nCloudInMap; ++i)  // if extracting some of the recent points to build a local map in the global map
+        {
+            *cloudMapLocal_ += *cloudFramesMapGlobal_[i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
+        } 
+    }
+
+    // for debugging
+    if (debug_print_cloud_map_size)
+    {
+        RCLCPP_WARN_STREAM(get_logger(), "cloudFramesMapGlobal_.size() = " << cloudFramesMapGlobal_.size());
+        RCLCPP_WARN_STREAM(get_logger(), "cloudMapLocal_->points.size() = " << cloudMapLocal_->points.size());
+    }
+}
+
+void Frontend::downsampleCloud() 
+{
+    downsizeFilterMapLocal_.setInputCloud(cloudMapLocal_);
+    cloudMapLocalDs_->clear();
+    downsizeFilterMapLocal_.filter(*cloudMapLocalDs_);
+
+    // for debugging
+    if(debug_print_first_point_in_current_scan)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), __FUNCTION__ << __LINE__);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].x: " << cloudScanCurr_->points[0].x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].y: " << cloudScanCurr_->points[0].y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].z: " << cloudScanCurr_->points[0].z);
+    }
+
+    downsizeFilterScanCurr_.setInputCloud(cloudScanCurr_);
+    cloudScanCurrDs_->clear();
+    downsizeFilterScanCurr_.filter(*cloudScanCurrDs_);
+
+    // for debugging
+    if(debug_print_first_point_in_current_scan)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), __FUNCTION__ << __LINE__);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurrDs_->points[0].x: " << cloudScanCurrDs_->points[0].x);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurrDs_->points[0].y: " << cloudScanCurrDs_->points[0].y);
+        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurrDs_->points[0].z: " << cloudScanCurrDs_->points[0].z);
+    }
+}
+
+void Frontend::solveLeastSquares()
+{
+    // set the local map point cloud to the kd_tree to nearest neighbor search
+    kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+
+    // create pose parameters variables to optimize in Ceres solver    
+    // pose representation: [quaternion: w, x, y, z | transition: x, y, z]
+    // this parameters are iteratively optimized in Ceres
+    // we have to give pointers of the pose parameters to Ceres
+    // note that these parameters must represent an absolute pose (T_w_b: transformation of the robot w.r.t. the world) due to the design of Ceres solver
+    // ,although the solver iteratively optimizes the update increment(delta_T) at each iteration (so absolute pose should not matter theoretically)
+    double icpPoseParam[7] = 
+    {
+        q_w_bCurrKf_.w(),
+        q_w_bCurrKf_.x(),
+        q_w_bCurrKf_.y(),
+        q_w_bCurrKf_.z(),
+        t_w_bCurrKf_.x(),
+        t_w_bCurrKf_.y(),
+        t_w_bCurrKf_.z()
+    };
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
+        // define a loss function with some kernel
+        ceres::LossFunction *lossFunction = new ceres::HuberLoss(0.1); // the Huber kernel is the same as liliom
+
+        // define rotation parameterization: we parameterize rotation as quarternion by using built-in parameterization in Ceres
+        // if you use variables that live on manifolds(Lie-Groups) you have to define local parameterizations to tell Ceres how to manipulate those variables
+        // translation components live on a common vector space so they don't need parameterization, but rotation components do.
+        ceres::LocalParameterization *quatParameterization = new ceres::QuaternionParameterization();
+
+        // create a problem object in Ceres
+        ceres::Problem problem;
+
+        // add a pointer to the rotation variables to optimize, with the parameterization
+        problem.AddParameterBlock(icpPoseParam, 4, quatParameterization);
+        // void Problem::AddParameterBlock(double *values, int size, Manifold *manifold)
+        //  -> icpPoseParam,4,quatParameterization = pointer to icpPoseParam[0] and 4 succeeding components in the array with manifold parameterization
+        //                                         = rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
+
+        // add a pointer to the translation variables to optimize 
+        problem.AddParameterBlock(icpPoseParam + 4, 3);
+        // void Problem::AddParameterBlock(double *values, int size)
+        //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
+        //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
+
+        // compute necessary values for point-to-plane residual computation
+        // this is a praparation for the objective function in the least squares, later added to the problem by AddResidualBlock()
+        preparePointPlaneResidual();
+        // the following quantities are stored in pointScanCurrForResidual_ and planeNormDistForResidual_:
+        // x:point position -> surf_current_pts
+        // n:plane normal(weighted) -> normal.xyz in surf_normal
+        // d:the distance from the world origin to the plane -> normal.intensity in surf_normal
+
+        // for debugging
+        if (debug_print_num_residuals) 
+            std::cout << "num. of residual points = " << numResidual_ << std::endl;
+
+        // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+        for (int i = 0; i < numResidual_; ++i) 
+        {
+            // set x:the point position
+            Eigen::Vector3d currentPt(pointScanCurrForResidual_->points[i].x,
+                                        pointScanCurrForResidual_->points[i].y,
+                                        pointScanCurrForResidual_->points[i].z);
+            // here currentPt is a measured point in the body frame and the transformation from body to world is done in LidarPlaneNormIncreFactor
+            // note that we have to give the point position in BODY to allow Ceres to examine the loss change w.r.t. the transformation increment in LidarPlaneNormIncreFactor
+            
+            // set n:the normal
+            Eigen::Vector3d norm(planeNormDistForResidual_->points[i].x,
+                                    planeNormDistForResidual_->points[i].y,
+                                    planeNormDistForResidual_->points[i].z);
+
+            // set d:distance from the world origin to the plane(=norm inverse)
+            double normInverse = planeNormDistForResidual_->points[i].intensity; // this is the weighted distance from the origin to the plane
+
+            // set cost function (residual) based on x,n,d
+            // point-to-plane residual (=nx+d) will be computed in the cost function (LidarPlaneNormIncreFactor)
+            // one point corresponds to one residual(cost function) 
+            // Jacobian is to be computed in ceres::AutoDiff in LidarPlaneNormIncreFactor, so we don't define analytical Jacobian in this code
+            ceres::CostFunction *costFunction = LidarPlaneNormIncreFactor::Create(currentPt, norm, normInverse);
+            problem.AddResidualBlock(costFunction, lossFunction, icpPoseParam, icpPoseParam + 4);
+            // -> icpPoseParam   = parameters of rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
+            // -> icpPoseParam+4 = parameters of translation component in icpPoseParam (icpPoseParam[4],[5],[6])
+            // ResidualBlockId Problem::AddResidualBlock(CostFunction *cost_function, LossFunction *loss_function, const std::vector<double*> parameter_blocks)
+        }
+
+        // set some solver parameters
+        ceres::Solver::Options solverOptions;
+        solverOptions.linear_solver_type = ceres::DENSE_QR;
+        solverOptions.max_num_iterations = config_.max_iterations;
+        solverOptions.max_solver_time_in_seconds = config_.max_solver_time_in_seconds;
+        solverOptions.minimizer_progress_to_stdout = false;
+        solverOptions.check_gradients = false;
+        solverOptions.gradient_check_relative_precision = 1e-2;
+
+        // create a solution container
+        ceres::Solver::Summary summary;
+
+        // solve the least squares for this round in ICP
+        ceres::Solve(solverOptions, &problem, &summary);
+
+        // make sure w in rotation quaternion is positive (carried over from liliom)
+        // this might not be necesary but keep it just in case
+        if(icpPoseParam[0] < 0) 
+        {
+            Eigen::Quaterniond tmpQ(icpPoseParam[0],
+                    icpPoseParam[1],
+                    icpPoseParam[2],
+                    icpPoseParam[3]);
+            tmpQ = unifyQuaternion(tmpQ);
+            icpPoseParam[0] = tmpQ.w();
+            icpPoseParam[1] = tmpQ.x();
+            icpPoseParam[2] = tmpQ.y();
+            icpPoseParam[3] = tmpQ.z();
+        }
+
+        pointScanCurrForResidual_->clear();
+        planeNormDistForResidual_->clear();
+
+        // update the pose variables to the latest optimized ones
+        // icpPoseParam[] is what is being optimized in the Ceres process above
+        // we need to update the pose (q_w_bCurrKf_, t_w_bCurrKf_) to re-compute the nearest neighbor points and planes in preparePointPlaneResidual() at each iteration
+        // , so we have to update the pose variables(q_w_bCurrKf_, t_w_bCurrKf_) at each ICP iteration.
+        q_w_bCurrKf_ = Eigen::Quaterniond(
+                            icpPoseParam[0],
+                            icpPoseParam[1],
+                            icpPoseParam[2],
+                            icpPoseParam[3]);
+        t_w_bCurrKf_ = Eigen::Vector3d(
+                            icpPoseParam[4],
+                            icpPoseParam[5],
+                            icpPoseParam[6]);
+    }
+    // end of the point-to-plane icp
+}
+
+void Frontend::preparePointPlaneResidual() 
+{
+    numResidual_=0;
+
+    for (size_t i=0; i<cloudScanCurrDs_->points.size(); ++i) 
+    {
+        PointType point_sel;
+
+        transformPointToWorldFrame(cloudScanCurrDs_->points[i], point_sel);
+        // cloudScanCurrDs_ is in body frame
+        // point_sel is in world frame
+
+        // for debugging
+        if(debug_print_point_plane_residual_preparation)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+            RCLCPP_INFO_STREAM(get_logger(), "point_sel:");
+            RCLCPP_INFO_STREAM(get_logger(), "  x: " << point_sel.x);
+            RCLCPP_INFO_STREAM(get_logger(), "  y: " << point_sel.y);
+            RCLCPP_INFO_STREAM(get_logger(), "  z: " << point_sel.z);
+            RCLCPP_INFO_STREAM(get_logger(), "cloudScanCurrDs_->points[i]:");
+            RCLCPP_INFO_STREAM(get_logger(), "  x: " << cloudScanCurrDs_->points[i].x);
+            RCLCPP_INFO_STREAM(get_logger(), "  y: " << cloudScanCurrDs_->points[i].y);
+            RCLCPP_INFO_STREAM(get_logger(), "  z: " << cloudScanCurrDs_->points[i].z);
+        }
+
+        std::vector<int> point_search_idx;
+        std::vector<float> point_search_dists;
+
+        // search 5 points from kd_tree via NN search
+        kdTreeMapLocal_->nearestKSearch(point_sel, 5, point_search_idx, point_search_dists);
+
+        Eigen::Matrix<double, 5, 3> matA0;
+        Eigen::Matrix<double, 5, 1> matB0 = - Eigen::Matrix<double, 5, 1>::Ones();
+
+        // extract a plane and compute point-to-plane residual
+        if (point_search_dists[4] < 1.0) 
+        {
+            PointType center;
+
+            for (int j = 0; j < 5; ++j) 
+            {
+                matA0(j, 0) = cloudMapLocalDs_->points[point_search_idx[j]].x;
+                matA0(j, 1) = cloudMapLocalDs_->points[point_search_idx[j]].y;
+                matA0(j, 2) = cloudMapLocalDs_->points[point_search_idx[j]].z;
+
+                // for debugging
+                if(debug_print_point_plane_residual_preparation)
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+                    RCLCPP_INFO_STREAM(get_logger(), "NN search result ----");
+                    RCLCPP_INFO_STREAM(get_logger(), "cloudMapLocalDs_->points[point_search_idx[j]]:");
+                    RCLCPP_INFO_STREAM(get_logger(), "  x: " << cloudMapLocalDs_->points[point_search_idx[j]].x);
+                    RCLCPP_INFO_STREAM(get_logger(), "  y: " << cloudMapLocalDs_->points[point_search_idx[j]].y);
+                    RCLCPP_INFO_STREAM(get_logger(), "  z: " << cloudMapLocalDs_->points[point_search_idx[j]].z);
+                }
+            }
+
+            // solve linear system to extract a plane normal vector (this is also a least squares)
+            // get the norm of the plane using linear solver based on QR composition
+            Eigen::Vector3d norm = matA0.colPivHouseholderQr().solve(matB0);
+            double normInverse = 1 / norm.norm(); // =d:distance from the plane to the origin
+            norm.normalize(); // get the unit norm
+
+            // Compute the centroid of the plane
+            center.x = matA0.col(0).sum() / 5.0;
+            center.y = matA0.col(1).sum() / 5.0;
+            center.z = matA0.col(2).sum() / 5.0;
+            // Actually these are not used
+
+            // Make sure that the plane is fit
+            // check the distance between the 5 map points and the plane
+            bool planeValid = true;
+            for (int j = 0; j < 5; ++j) 
+            {
+                if (fabs(norm.x() * cloudMapLocalDs_->points[point_search_idx[j]].x +
+                        norm.y() * cloudMapLocalDs_->points[point_search_idx[j]].y +
+                        norm.z() * cloudMapLocalDs_->points[point_search_idx[j]].z + normInverse) > 0.06) 
+                {
+                    planeValid = false;
+                    break;
+                }
+            }
+
+            // if it's validated to be a plane,
+            if (planeValid) 
+            {
+                // compute point-plane distance (n.x + d)
+                float pd = norm.x() * point_sel.x + norm.y() * point_sel.y + norm.z() * point_sel.z + normInverse;
+                // compute a weight for a point based on the point-plane distance
+                float weight = 1 - 0.9 * fabs(pd) / sqrt(sqrt(point_sel.x * point_sel.x + point_sel.y * point_sel.y + point_sel.z * point_sel.z));
+
+                // if the weight exceeds the threshold, store the points and normal into the residual container
+                // This is just for computing weighted normal, plane-origin distance, which is used for residual computation in LidarPlaneNormIncreFactor cost function
+                //  in the cost function, the measured points are transfromed to the world coordinate, so points should be in the body coordinate here.
+                // we adopt a weight calculation of either fast-lio or lili-om way
+                if(config_.use_fastlio_point_plane_residual_param)
+                {
+                    if(weight > 0.9) // fast-lio 
+                    {
+                        PointType normal;
+                        normal.x = norm.x();
+                        normal.y = norm.y();
+                        normal.z = norm.z();
+                        normal.intensity = normInverse;
+                        pointScanCurrForResidual_->push_back(cloudScanCurrDs_->points[i]);
+                        planeNormDistForResidual_->push_back(normal);
+
+                        // for debugging
+                        if(debug_print_point_plane_residual_preparation)
+                            RCLCPP_INFO_STREAM(get_logger(), "direct point-to-plane distance (pd): " << pd);
+
+                        ++numResidual_;
+                    }
+                }
+                else 
+                {
+                    if(weight > 0.4) // lili-om 
+                    {
+                        PointType normal;
+                        normal.x = weight * norm.x();
+                        normal.y = weight * norm.y();
+                        normal.z = weight * norm.z();
+                        normal.intensity = weight * normInverse;
+                        pointScanCurrForResidual_->push_back(cloudScanCurrDs_->points[i]);
+                        planeNormDistForResidual_->push_back(normal);
+
+                        // for debugging
+                        if(debug_print_point_plane_residual_preparation)
+                            RCLCPP_INFO_STREAM(get_logger(), "direct point-to-plane distance (pd): " << pd);
+
+                        ++numResidual_;
+                    }
+                }
+
+                // the quantities are stored:
+                // x:point position -> surf_current_pts
+                // n:plane normal(weighted) -> normal.xyz in surf_normal
+                // d:the distance from the world origin to the plane -> normal.intensity in surf_normal
+                //  ,which are used for point-to-plane residual computation later
+            }
+        }
+    }
+}
+
+void Frontend::updatePoseLO()
+{
+    q_bPrevKf_bCurrKf_lo_ = q_w_bPrevKf_.inverse() * q_w_bCurrKf_;
+    q_bPrevKf_bCurrKf_lo_.normalize();
+    t_bPrevKf_bCurrKf_lo_ = q_w_bPrevKf_.inverse() * (t_w_bCurrKf_ - t_w_bPrevKf_);
+
+    // for debugging
+    if(debug_print_relative_transform_lo)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_lo_: " << t_bPrevKf_bCurrKf_lo_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_lo_: " << q_bPrevKf_bCurrKf_lo_.coeffs().transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_.coeffs().transpose());
+    }
+}
+
+void Frontend::run()
+{
+    // check if any measurement data available
+    // mtxImu_.lock(); 
+    // mtxCloud_.lock();
+    if(cloudMsgBuffer_.empty() || imuMsgBuffer_.empty())
+    {
+        // mtxImu_.unlock();
+        // mtxCloud_.unlock();
+        return;
+    }
+    // mtxImu_.unlock();
+    // mtxCloud_.unlock();
+
+    // Check the process status in a thread-safe way. If it's processing, skip the process.
+    // if set this main process as timer callback, we need to make sure there is not race condition (default: set timer callback)
+    if (config_.set_main_process_timer)
+    {
+        bool expectedProcessStatus = false;
+        if(!isProcessing_.compare_exchange_strong(expectedProcessStatus, true))
+            return;
+    }
+    
+
+    // ----- pre-process ----- 
+    synchronizeMeasurements();
+
+    if(!isImuInitialized_)
+    {
+        initializeImu();
+        isImuInitialized_ = true;
+    }
+    
+    propagateImu();
+
+    transformPointCloudInImuFrame();
+
+    makeInitialGuess();
+
+    deskewPointCloud();
+
+
+    // ----- lidar odometry ----- 
+    if(!isCloudMapInitialized_)
+    {
+        initializeCloudMap();
+        isCloudMapInitialized_ = true;
+        clearProcess();
+        isProcessing_.store(false);
+        return;
+    }
+
+    setInitialPose();
+
+    buildLocalMap();
+    
+    downsampleCloud();
+
+    solveLeastSquares();
+    
+    updatePoseLO();
+
+
+    //  ----- factor graph optimization ----- 
+    // factor graph is commented out now, might or might not be implemented in the future
+    // if (isSystemInited_ == false) 
+    // {
+    //     initializeSystem(rclcpp::Time(keyFrameDataWindow_.header.stamp).seconds());
+    //     isSystemInited_ = true;
+    //     // return;
+    // }
+    // integrateImu();
+    // performFixedLagSmoothing();
+    // updatePoseFactorGraph();
+
+
+    //  ----- post-process ----- 
+    transformPointCloudInWorldFrame();
+
+    // publish ROS2 message for visualization
+    publishOdometry();
+    publishCloud();
+    publishTf();
+
+    updateCloudMap();
+    clearProcess();
+
+
+    // if set this main process as timer callback, we need to make sure there is not race condition
+    if (config_.set_main_process_timer)
+        isProcessing_.store(false);
+}
+
+void Frontend::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msgIn)
+{
+    // store incomming imu data
+    mtxImu_.lock();
+    sensor_msgs::msg::Imu imu=*msgIn;
+    imuMsgBuffer_.push_back(imu);
+    mtxImu_.unlock();
+}
+
+void Frontend::cloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msgIn)
+{
+    // store incomming point cloud data
+    mtxCloud_.lock();
+    sensor_msgs::msg::PointCloud2 cloud=*msgIn;
+    cloudMsgBuffer_.push_back(cloud);
+    mtxCloud_.unlock();
+
+    // if not call the main process (run()) in timer, call run() every time receiving point cloud msg
+    if (!config_.set_main_process_timer)
+    {
+        run();
+    }
+}
+
+void Frontend::transformPointCloudInWorldFrame()
+{
+    for (auto point: cloudScanCurr_->points)
+    {
+        Eigen::Vector3d t_b_pt(point.x, point.y, point.z);
+        Eigen::Vector3d t_w_pt = q_w_bCurrKf_ * t_b_pt + t_w_bCurrKf_;
+
+        PointType ptInW;
+        ptInW.x = t_w_pt.x();
+        ptInW.y = t_w_pt.y();
+        ptInW.z = t_w_pt.z();
+        cloudCurrentScanInWorld_->points.push_back(ptInW);
+    }
+}
+
+void Frontend::updateCloudMap() 
+{
+    // for (auto &pt: cloud_current_scan_->points)
+    // {
+    //     // Eigen::Vector3d ptIn(pt->x, pt->y, pt->z);
+    //     Eigen::Vector3d ptIn(pt.x, pt.y, pt.z);
+    //     Eigen::Vector3d ptOut = q_w_bCurrKf_ * ptIn + t_w_bCurrKf_;
+
+    //     pt.x = ptOut.x();
+    //     pt.y = ptOut.y();
+    //     pt.z = ptOut.z();
+    // }
+    // cloudFramesMapGlobal_.push_back(cloud_current_scan_);
+
+    pcl::PointCloud<PointType>::Ptr cloud;
+    cloud.reset(new pcl::PointCloud<PointType>());
+    // swap (=move) point cloud for fast computation
+    std::swap(cloudCurrentScanInWorld_, cloud);
+
+    cloudFramesMapGlobal_.push_back(cloud);
+}
+
+void Frontend::publishOdometry()
+{
+    nav_msgs::msg::Odometry odom;
+    odom.header.frame_id = ODOM_FRAME;
+    odom.header.stamp.sec = (int32_t)timeCurrScanEnd_;
+    odom.header.stamp.nanosec = (uint32_t)((timeCurrScanEnd_ - (int32_t)timeCurrScanEnd_) * 1e+9f);
+    odom.child_frame_id = BASE_FRAME;
+
+    odom.pose.pose.position.x = t_w_bCurrKf_.x();
+    odom.pose.pose.position.y = t_w_bCurrKf_.y();
+    odom.pose.pose.position.z = t_w_bCurrKf_.z();
+    odom.pose.pose.orientation.w = q_w_bCurrKf_.w();
+    odom.pose.pose.orientation.x = q_w_bCurrKf_.x();
+    odom.pose.pose.orientation.y = q_w_bCurrKf_.y();
+    odom.pose.pose.orientation.z = q_w_bCurrKf_.z();
+
+    pubOdom_->publish(odom);
+}
+
+void Frontend::publishCloud() 
+{
+    sensor_msgs::msg::PointCloud2 cloud;
+    pcl::toROSMsg(*cloudCurrentScanInWorld_, cloud);
+    cloud.header.stamp.sec = (int32_t)timeCurrScanEnd_;
+    cloud.header.stamp.nanosec = (uint32_t)((timeCurrScanEnd_ - (int32_t)timeCurrScanEnd_) * 1e+9f);
+    cloud.header.frame_id = MAP_FRAME;
+    // The point cloud transformation is only IMU->ODOM
+    // It should be theoretically IMU->BASE->ODOM->MAP
+    // But in this lo, IMU=BASE->ODOM=MAP so only IMU->ODOM transformation is okay
+
+    pubCloud_->publish(cloud);
+}
+
+// This function is just for ROS2 Rviz visualization (not important)
+void Frontend::publishTf()
+{
+    // Publish ODOM->BASE tf
+    // This should take into account MAP->ODOM to make this more general
+    geometry_msgs::msg::TransformStamped tf_odom_base;
+    tf_odom_base.header.stamp = get_clock()->now();    // keyframe time (sim time)
+    tf_odom_base.header.frame_id = ODOM_FRAME;
+    tf_odom_base.child_frame_id = BASE_FRAME; // BASE_FRAME = IMU_FRAME in this livo
+    tf_odom_base.transform.translation.x = t_w_bCurrKf_.x();
+    tf_odom_base.transform.translation.y = t_w_bCurrKf_.y();
+    tf_odom_base.transform.translation.z = t_w_bCurrKf_.z();
+    // tf_odom_base.transform.rotation = tf2::toMsg(q_w_bCurrKf_.normalized());
+    tf_odom_base.transform.rotation.w = q_w_bCurrKf_.w();
+    tf_odom_base.transform.rotation.x = q_w_bCurrKf_.x();
+    tf_odom_base.transform.rotation.y = q_w_bCurrKf_.y();
+    tf_odom_base.transform.rotation.z = q_w_bCurrKf_.z();
+    // tfBroadcaster_->sendTransform(tf_odom_base);
+    // t_w_bCurrKf_ and q_w_bCurrKf_ are only ODOM->IMU by definition in the code
+    // It should be theoretically ODOM->BASE (because this should represent odometry)
+    // But in this livo, MAP=ODOM->BASE=IMU so only IMU->ODOM = BASE->ODOM transformation
+    // Skipping unnecessary computation but keeping clarity
+
+    // should be: in the future
+    // Eigen::isometry3d tCur
+    // geometry_msgs::msg::TransformStamped ts;
+    // tf2::convert(tCur, ts);
+
+    // Publish MAP->ODOM tf (constant)
+    geometry_msgs::msg::TransformStamped tf_map_odom;
+    tf_map_odom.header.stamp = get_clock()->now();
+    tf_map_odom.header.frame_id = MAP_FRAME;
+    tf_map_odom.child_frame_id = ODOM_FRAME;
+    tf_map_odom.transform.translation.x = t_MAP_ODOM.x();
+    tf_map_odom.transform.translation.y = t_MAP_ODOM.y();
+    tf_map_odom.transform.translation.z = t_MAP_ODOM.z();
+    // tf_map_odom.transform.rotation = tf2::toMsg(q_MAP_ODOM.normalized());
+    tf_map_odom.transform.rotation.w = q_MAP_ODOM.w();
+    tf_map_odom.transform.rotation.x = q_MAP_ODOM.x();
+    tf_map_odom.transform.rotation.y = q_MAP_ODOM.y();
+    tf_map_odom.transform.rotation.z = q_MAP_ODOM.z();
+    // tfBroadcaster_->sendTransform(tf_map_odom);
+
+    tfBroadcaster_->sendTransform(std::vector{tf_map_odom, tf_odom_base});
+    // MAP->ODOM transformation is always assumed to be constant
+}
+
+// This function is just for ROS2 Rviz visualization (not important)
+void Frontend::publishStaticTf()
+{
+    // Publish BASE->IMU tf (constant)
+    geometry_msgs::msg::TransformStamped tf_base_imu;
+    tf_base_imu.header.stamp = get_clock()->now();
+    tf_base_imu.header.frame_id = BASE_FRAME;
+    tf_base_imu.child_frame_id = IMU_FRAME;
+    tf_base_imu.transform.translation.x = t_BASE_IMU.x();
+    tf_base_imu.transform.translation.y = t_BASE_IMU.y();
+    tf_base_imu.transform.translation.z = t_BASE_IMU.z();
+    // tf_base_imu.transform.rotation = tf2::toMsg(q_BASE_IMU);
+    tf_base_imu.transform.rotation.w = q_BASE_IMU.w();
+    tf_base_imu.transform.rotation.x = q_BASE_IMU.x();
+    tf_base_imu.transform.rotation.y = q_BASE_IMU.y();
+    tf_base_imu.transform.rotation.z = q_BASE_IMU.z();
+    // tfBroadcaster_->sendTransform(tfMsg);
+    // BASE->IMU transformation is always assumed to be constant
+
+    // Publish BASE->LIDAR tf (constant)
+    geometry_msgs::msg::TransformStamped tf_base_lidar;
+    tf_base_lidar.header.stamp = get_clock()->now();
+    Eigen::Vector3d t_base_lidar = t_BASE_IMU + q_BASE_IMU * t_IMU_LIDAR;
+    Eigen::Quaterniond q_base_lidar = (q_BASE_IMU * q_IMU_LIDAR).normalized();
+    tf_base_lidar.header.frame_id = BASE_FRAME;
+    tf_base_lidar.child_frame_id = LIDAR_FRAME;
+    tf_base_lidar.transform.translation.x = t_base_lidar.x();
+    tf_base_lidar.transform.translation.y = t_base_lidar.y();
+    tf_base_lidar.transform.translation.z = t_base_lidar.z();
+    // tf_base_lidar.transform.rotation = tf2::toMsg(q_base_lidar);
+    tf_base_lidar.transform.rotation.w = q_base_lidar.w();
+    tf_base_lidar.transform.rotation.x = q_base_lidar.x();
+    tf_base_lidar.transform.rotation.y = q_base_lidar.y();
+    tf_base_lidar.transform.rotation.z = q_base_lidar.z();
+    // tfBroadcaster_->sendTransform(tfMsg);
+
+    tfStaticBroadcaster_->sendTransform(std::vector<geometry_msgs::msg::TransformStamped>{tf_base_imu, tf_base_lidar});
+}
+
+void Frontend::clearProcess()
+{
+    imuMsgKfWindow_.clear();
+    cloudKfWindow_->clear();
+    imuPoseTimeline_.clear();
+
+    cloudScanCurr_->clear();
+    cloudScanCurrDs_->clear();
+    cloudCurrentScanInWorld_->clear();
+
+    timePrevScanEnd_ = timeCurrScanEnd_;
+
+    q_w_bPrevKf_ = q_w_bCurrKf_;
+    t_w_bPrevKf_ = t_w_bCurrKf_;
+}
+
+} // namespace lo_dev
