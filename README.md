@@ -71,7 +71,7 @@ You have to run the code in Ubuntu and need docker to setup the environment.
 
 ## Folder Structure in your host environment
   ```
-lo_dev/
+24785-project/
   │── docker/
   │   │── docker-compose.yml
   │   │── Dockerfile
@@ -91,7 +91,7 @@ lo_dev/
          │── install/ 
          │── log/ 
          │── src/ 
-              |── lo_dev/
+              |── 24785-project/
                    │── cmake/
                    │── config/
                    │── docker/
