@@ -2,12 +2,12 @@
   ros__parameters:
     # imu_topic: "/sim_imu"   # Isaac Sim
     # lidar_topic: "/sim_lidar/point_cloud"   # Isaac Sim
-    imu_topic: "/automine/imu"   # AutoMine
-    lidar_topic: "/automine/lidar"   # AutoMine
-    # imu_topic: "/imu_raw"   # KITTI
-    # lidar_topic: "/points_raw"   # KITTI
-    sensor: "ouster"    # Isaac Sim, AutoMine
-    # sensor: "velodyne"    # KITTI
+    # imu_topic: "/automine/imu"   # AutoMine
+    # lidar_topic: "/automine/lidar"   # AutoMine
+    imu_topic: "/imu_raw"   # KITTI
+    lidar_topic: "/points_raw"   # KITTI
+    # sensor: "ouster"    # Isaac Sim, AutoMine
+    sensor: "velodyne"    # KITTI
     
     # world_frame: "map"
     # sensor_frame: "sensor"
@@ -80,21 +80,21 @@
 
 
     ## AutoMine OCT-00
-    # Orientation of lidar frame w.r.t. imu frame
-    R_imu_lidar: [9.99991000e-01, -4.00790000e-03, -1.57277000e-03,
-                  4.03242000e-03,  9.99865000e-01,  1.59156000e-02,
-                  1.50877000e-03, -1.59218000e-02,  9.99872000e-01]
-    # Translation of lidar frame w.r.t. imu frame
-    t_imu_lidar: [1.64752937e+00, -1.83728126e-02, 4.37729539e-01]
+    # # Orientation of lidar frame w.r.t. imu frame
+    # R_imu_lidar: [9.99991000e-01, -4.00790000e-03, -1.57277000e-03,
+    #               4.03242000e-03,  9.99865000e-01,  1.59156000e-02,
+    #               1.50877000e-03, -1.59218000e-02,  9.99872000e-01]
+    # # Translation of lidar frame w.r.t. imu frame
+    # t_imu_lidar: [1.64752937e+00, -1.83728126e-02, 4.37729539e-01]
 
 
     ## KITTI
-    # # Orientation of lidar frame w.r.t. imu frame
-    # R_imu_lidar: [ 9.99997600e-01, -7.85402700e-04,  2.02440600e-03,
-    #                7.55307100e-04,  9.99889800e-01,  1.48245400e-02,
-    #               -2.03582600e-03, -1.48229800e-02,  9.99888100e-01 ]
-    # # Translation of lidar frame w.r.t. imu frame
-    # t_imu_lidar: [ 8.10543903e-01, -3.07054359e-01, 8.02724058e-01]
+    # Orientation of lidar frame w.r.t. imu frame
+    R_imu_lidar: [ 9.99997600e-01, -7.85402700e-04,  2.02440600e-03,
+                   7.55307100e-04,  9.99889800e-01,  1.48245400e-02,
+                  -2.03582600e-03, -1.48229800e-02,  9.99888100e-01 ]
+    # Translation of lidar frame w.r.t. imu frame
+    t_imu_lidar: [ 8.10543903e-01, -3.07054359e-01, 8.02724058e-01]
 
 
 
