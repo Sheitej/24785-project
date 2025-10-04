@@ -73,13 +73,15 @@ RUN apt-get -y install ros-humble-grid-map-msgs ros-humble-grid-map
 # WORKDIR /sandbox/ysugano/Livox-SDK2/build
 # RUN cmake .. && make -j2 && make install
 
-WORKDIR /sandbox/ysugano
+# WORKDIR /sandbox/ysugano
+WORKDIR /sandbox
 RUN git clone http://github.com/strasdat/Sophus.git \
     && cd Sophus && git checkout 97e7161 \
     && mkdir build && cd build && cmake .. -DBUILD_TESTS=OFF \
     && make -j8 && sudo make install
 
-WORKDIR /sandbox/ysugano
+# WORKDIR /sandbox/ysugano
+WORKDIR /sandbox
 RUN git clone https://github.com/borglab/gtsam.git && \
     cd gtsam && git checkout 4abef92 &&\
     mkdir build && \
