@@ -154,7 +154,8 @@ void Frontend::initializeInterface()
     }
 
     // set measurement subscriber callback group 'Reentrant' to ensure multi-threading process.
-    rclcpp::CallbackGroup::SharedPtr subCbGr = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    rclcpp::CallbackGroup::SharedPtr subCbGr = create_callback_group(rclcpp::CallbackGroupType::Reentrant);  // for multi-thread
+    // rclcpp::CallbackGroup::SharedPtr subCbGr = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive); // for single thread
     rclcpp::SubscriptionOptions subOpt;
     subOpt.callback_group = subCbGr;
     
@@ -1188,6 +1189,9 @@ void Frontend::run()
 
 void Frontend::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msgIn)
 {
+    // for check the number of threads for the callbacks
+    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << ":   Callback running on TID=" << std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
     // store incomming imu data
     mtxImu_.lock();
     sensor_msgs::msg::Imu imu=*msgIn;
@@ -1197,6 +1201,9 @@ void Frontend::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msgIn)
 
 void Frontend::cloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msgIn)
 {
+    // for check the number of threads for the callbacks
+    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << ": Callback running on TID=" << std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
     // store incomming point cloud data
     mtxCloud_.lock();
     sensor_msgs::msg::PointCloud2 cloud=*msgIn;

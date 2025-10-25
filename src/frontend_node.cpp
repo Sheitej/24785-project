@@ -15,7 +15,8 @@ int main(int argc, char **argv)
 
     // std::cout << __FUNCTION__ << __LINE__ << std::endl;
 
-    rclcpp::executors::MultiThreadedExecutor executor;
+    rclcpp::executors::MultiThreadedExecutor executor;  // for multi-thread
+    // rclcpp::executors::SingleThreadedExecutor executor;  // for single thread
     executor.add_node(frontend);
     executor.spin();
     // rclcpp::spin(featureExtraction->get_node_base_interface());

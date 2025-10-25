@@ -50,9 +50,9 @@ def generate_launch_description():
         parameters=[
             LaunchConfiguration("config_file"),
         ],
-        remappings=[
-            ("laser_odom_to_init", LaunchConfiguration("odom_topic")),
-        ]
+        # remappings=[
+        #     ("laser_odom_to_init", LaunchConfiguration("odom_topic")),
+        # ]
     )
 
     rviz2_node = Node(

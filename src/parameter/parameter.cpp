@@ -107,7 +107,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
 {
     node->declare_parameter<std::string>("imu_topic","imu/data");
     node->declare_parameter<std::string>("lidar_topic","velodyne_points");
-    node->declare_parameter<std::string>("odom_topic","integrated_to_init");
+    node->declare_parameter<std::string>("odom_topic","");
 
     node->declare_parameter<std::string>("map_frame", "map");
     node->declare_parameter<std::string>("odom_frame", "odom");
