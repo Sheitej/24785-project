@@ -91,6 +91,18 @@ extern bool debug_print_point_plane_residual_preparation;
 extern bool debug_print_scan_imu_time_sync;
 extern bool debug_print_first_point_in_current_scan;
 extern bool debug_print_cloud_map_size;
+extern bool debug_print_keyframe_id;
+extern bool debug_print_lo_relative_pose_fg;
+extern bool debug_print_PreintegratedImuMeasurements_fg;
+extern bool debug_print_imu_factor_fg;
+extern bool debug_print_imu_bias_factor_fg;
+extern bool debug_print_lo_factor_fg;
+extern bool debug_print_imu_prop_state_fg;
+extern bool debug_print_estimated_state_fg;
+extern bool debug_print_published_pose;
+extern bool debug_print_key_timestamp_in_window;
+extern bool debug_print_num_factors_values;
+
 
 // for initialization parameter
 extern bool init_imu_init_fastlio2;

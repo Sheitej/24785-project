@@ -43,6 +43,10 @@
 namespace lo_dev 
 {
 
+using gtsam::symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
+using gtsam::symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
+using gtsam::symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
+
 struct Config_Frontend
 {
     // ---- for general ---- 
@@ -67,16 +71,19 @@ struct Config_Frontend
     int max_iterations;
     double max_solver_time_in_seconds;
     double voxel_filter_size;
+    int max_cloud_frame_for_local_map;
     int icp_iteration_num;
     bool use_liosam_gauss_newton;
     bool use_fastlio_point_plane_residual_param;
     bool build_local_map_from_all_global_map;
 
     // ---- for factor graph----
+    bool turn_on_factor_graph;
     float lidar_correction_noise;
-    float smooth_factor;
-    bool  use_imu_roll_pitch;
+    float smooth_factor;        // what's this?
+    // bool  use_imu_roll_pitch;
     double lag; 
+    bool use_lo_prior_factor_wo_between_factor; 
 };
 
 class Frontend : public rclcpp::Node 
@@ -119,14 +126,14 @@ public:
 
     // factor graph is commented out now (currently not implemented and might or might not be used in the future)
     // // ---- for factor graph ---- 
+    void initializeFG();  // initial_system(double currentCorrectionTime, gtsam::Pose3 lidarPose) 
+    void resetSmoother();   // resetOptimization() in original
     // void resetInitFlags();  // resetParams() in original
-    // void resetSmoother();   // resetOptimization() in original
     // void resetKeyframesPrior();  // reset_graph() in original
-    // void initializeSystem(double initialTime);  // initial_system(double currentCorrectionTime, gtsam::Pose3 lidarPose) 
     // bool readParameters();
     // void initializeInterface();
     // void integrateImu();
-    // void performFixedLagSmoothing();
+    void performFixedLagSmoothing();
 
 
 private:
@@ -136,6 +143,7 @@ private:
     rclcpp::TimerBase::SharedPtr mainProcessTimer;  // added to periodically check if isProcessing_ and start the next Kf process
     std::deque<sensor_msgs::msg::Imu> imuMsgKfWindow_;
     pcl::PointCloud<PointType>::Ptr cloudKfWindow_;
+    TimeLogger timeLogger_;
 
     // pose(transformation) variables
     Eigen::Quaterniond q_w_bPrevKf_;    // imu pose(rotation) w.r.t. world at the previous keyframe(previous scan)
@@ -199,7 +207,8 @@ private:
 
 
     // ---- for factor graph ---- (currently not used and might or might not be used in the future)
-    bool isSystemInited_; 
+    // bool isSystemInited_; 
+    bool isFGInitialized_; 
     bool isFirstSmoothingDone_; 
     gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorVelNoise_;

@@ -47,6 +47,18 @@ bool debug_print_point_plane_residual_preparation;
 bool debug_print_scan_imu_time_sync;
 bool debug_print_first_point_in_current_scan;
 bool debug_print_cloud_map_size;
+bool debug_print_keyframe_id;
+bool debug_print_lo_relative_pose_fg;
+bool debug_print_PreintegratedImuMeasurements_fg;
+bool debug_print_imu_factor_fg;
+bool debug_print_imu_bias_factor_fg;
+bool debug_print_lo_factor_fg;
+bool debug_print_imu_prop_state_fg;
+bool debug_print_estimated_state_fg;
+bool debug_print_published_pose;
+bool debug_print_key_timestamp_in_window;
+bool debug_print_num_factors_values;
+
 
 // for initialization parameter
 bool init_imu_init_fastlio2;
@@ -179,6 +191,17 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.print_scan_imu_time_sync", false);
     node->declare_parameter<bool>("debug.print_first_point_in_current_scan", false);
     node->declare_parameter<bool>("debug.print_cloud_map_size", false);
+    node->declare_parameter<bool>("debug.print_keyframe_id", false);
+    node->declare_parameter<bool>("debug.print_lo_relative_pose_fg", false);
+    node->declare_parameter<bool>("debug.print_PreintegratedImuMeasurements_fg", false);
+    node->declare_parameter<bool>("debug.print_imu_factor_fg", false);
+    node->declare_parameter<bool>("debug.print_imu_bias_factor_fg", false);
+    node->declare_parameter<bool>("debug.print_lo_factor_fg", false);
+    node->declare_parameter<bool>("debug.print_imu_prop_state_fg", false);
+    node->declare_parameter<bool>("debug.print_estimated_state_fg", false);
+    node->declare_parameter<bool>("debug.print_published_pose", false);
+    node->declare_parameter<bool>("debug.print_key_timestamp_in_window", false);
+    node->declare_parameter<bool>("debug.print_num_factors_values", false);
 
     debug_print_imu_forward_propagation_state = node->get_parameter("debug.print_imu_forward_propagation_state").as_bool();
     debug_print_get_imu_pose_at_measurement_time = node->get_parameter("debug.print_get_imu_pose_at_measurement_time").as_bool();
@@ -191,6 +214,17 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_scan_imu_time_sync = node->get_parameter("debug.print_scan_imu_time_sync").as_bool();
     debug_print_first_point_in_current_scan = node->get_parameter("debug.print_first_point_in_current_scan").as_bool();
     debug_print_cloud_map_size = node->get_parameter("debug.print_cloud_map_size").as_bool();
+    debug_print_keyframe_id = node->get_parameter("debug.print_keyframe_id").as_bool();
+    debug_print_lo_relative_pose_fg = node->get_parameter("debug.print_lo_relative_pose_fg").as_bool();
+    debug_print_PreintegratedImuMeasurements_fg = node->get_parameter("debug.print_PreintegratedImuMeasurements_fg").as_bool();
+    debug_print_imu_factor_fg = node->get_parameter("debug.print_imu_factor_fg").as_bool();
+    debug_print_imu_bias_factor_fg = node->get_parameter("debug.print_imu_bias_factor_fg").as_bool();
+    debug_print_lo_factor_fg = node->get_parameter("debug.print_lo_factor_fg").as_bool();
+    debug_print_imu_prop_state_fg = node->get_parameter("debug.print_imu_prop_state_fg").as_bool();
+    debug_print_estimated_state_fg = node->get_parameter("debug.print_estimated_state_fg").as_bool();
+    debug_print_published_pose = node->get_parameter("debug.print_published_pose").as_bool();
+    debug_print_key_timestamp_in_window = node->get_parameter("debug.print_key_timestamp_in_window").as_bool();
+    debug_print_num_factors_values = node->get_parameter("debug.print_num_factors_values").as_bool();
 
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_forward_propagation_state " << debug_print_imu_forward_propagation_state);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_get_imu_pose_at_measurement_time " << debug_print_get_imu_pose_at_measurement_time);
@@ -203,6 +237,17 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_scan_imu_time_sync" << debug_print_scan_imu_time_sync);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_first_point_in_current_scan" << debug_print_first_point_in_current_scan);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_cloud_map_size" << debug_print_cloud_map_size);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_keyframe_id" << debug_print_keyframe_id);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lo_relative_pose_fg" << debug_print_lo_relative_pose_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_PreintegratedImuMeasurements_fg" << debug_print_PreintegratedImuMeasurements_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_factor_fg" << debug_print_imu_factor_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_bias_factor_fg" << debug_print_imu_bias_factor_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lo_factor_fg" << debug_print_lo_factor_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_prop_state_fg" << debug_print_imu_prop_state_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_estimated_state_fg" << debug_print_estimated_state_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_published_pose" << debug_print_published_pose);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_key_timestamp_in_window" << debug_print_key_timestamp_in_window);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_factors_values" << debug_print_num_factors_values);
 
 
     // ---------- for initialization parameter ---------- 

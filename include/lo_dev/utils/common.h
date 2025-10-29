@@ -3,6 +3,13 @@
 
 // [20250915] Copied from common.h in liliom
 
+#include <chrono>
+#include <mutex>
+#include <string>
+#include <iomanip>
+#include <limits>
+#include <rclcpp/rclcpp.hpp>
+
 #include <sensor_msgs/msg/point_cloud.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -94,6 +101,14 @@ inline void getGtsamFromEigen(const Eigen::Quaterniond& qIn, const Eigen::Vector
     stateOut = gtsam::NavState(rotIn, ptIn, velIn);
 }
 
+inline void getGtsamFromEigen(const Eigen::Quaterniond& qIn, const Eigen::Vector3d& tIn, gtsam::Pose3& poseOut)
+{
+    const gtsam::Rot3 rotIn = gtsam::Rot3::Quaternion(qIn.w(), qIn.x(), qIn.y(), qIn.z());
+    const gtsam::Point3 ptIn = gtsam::Point3(tIn);
+
+    poseOut = gtsam::Pose3(rotIn, ptIn);
+}
+
 // from math_tool.h in liliom
 template <typename T>
 Eigen::Quaternion<T> unifyQuaternion(const Eigen::Quaternion<T> &q)
@@ -104,6 +119,182 @@ Eigen::Quaternion<T> unifyQuaternion(const Eigen::Quaternion<T> &q)
         return resultQ;
     }
 }
+
+class TimeLogger 
+{
+private:
+    // enum class State
+    // {
+    //     RUN, 
+    //     STOP
+    // };
+
+public:
+    struct TimerRecord
+    {
+        enum class State
+        {
+            RUN, 
+            STOP
+        };
+
+        TimerRecord() = default;
+        TimerRecord(const std::string &funcName)
+        {
+            funcName_ = funcName;
+        }
+
+        std::string funcName_;
+        int lineStart_;
+        int lineEnd_;
+        std::vector<std::chrono::steady_clock::time_point> time_start_;
+        std::vector<std::chrono::steady_clock::time_point> time_end_;
+        std::vector<double> time_usage_in_ms_;
+        double time_mean_in_ms_;
+
+        State state_;
+    };
+
+    TimeLogger() : logger_(rclcpp::get_logger("Default")) {}
+    explicit TimeLogger(const rclcpp::Logger& logger) : logger_(logger) {}
+
+    ~TimeLogger() 
+    {
+        // LOG Everything in the Destructor//
+        computeMeanTime();
+        // dumpIntoFile("Log");
+        dumpIntoFile("/sandbox/ysugano/ros2_ws/src/livo_dev/lo_dev/Log");
+
+        RCLCPP_INFO_STREAM(logger_, __FUNCTION__ << __LINE__);
+
+        // Then clear the file //
+        clear();
+    }
+    void clear()
+    {
+        records_.clear();
+    }
+
+    void setLogger(const rclcpp::Logger& logger)
+    {
+        logger_=logger;
+        // reset();
+    }
+
+    // void start(std::string label, std::string function, int line0)
+    void start(const std::string &label, const std::string &funcName, int lineStart)
+    {
+        std::lock_guard<std::mutex> lock(m_); // to make sure it's thread-safe
+
+        auto tStart = std::chrono::steady_clock::now();
+        
+        if (records_.find(label) == records_.end())     // static std::map<std::string, TimerRecord> records_;
+        {
+            records_.insert({label, TimerRecord(funcName)});
+            records_[label].time_start_.emplace_back(tStart);
+            records_[label].lineStart_=lineStart;
+            records_[label].state_ = TimerRecord::State::RUN;
+        }
+        else
+        {
+            if(records_[label].state_!=TimerRecord::State::STOP)
+            {
+                RCLCPP_INFO_STREAM(logger_, "[" << label << "]: " << "TimeLogger is still running. Please stop it before restarting.");   
+                return;
+            }
+
+            records_[label].time_start_.emplace_back(tStart);
+            records_[label].state_=TimerRecord::State::RUN;
+        }
+
+        // std::mutex m_ is automatically unlocked when it gets out of the function
+    }
+
+    // void stop(int line1)
+    void stop(const std::string &label, const std::string &funcName, int lineEnd)
+    {
+        std::lock_guard<std::mutex> lock(m_); // to make sure it's thread-safe
+
+        if (records_.find(label) == records_.end())     // static std::map<std::string, TimerRecord> records_;
+        {
+            RCLCPP_INFO_STREAM(logger_, "[" << label << "]: " << "TimeLogger is not running. Please start it before logging.");
+            // return;
+        }
+        else
+        {
+            if(records_[label].state_!=TimerRecord::State::RUN)
+            {
+                RCLCPP_INFO_STREAM(logger_, "[" << label << "]: " << "TimeLogger is not running. Please start it before logging.");
+                return;
+            }
+        
+            auto tStart = records_[label].time_start_.back();
+            auto tEnd = std::chrono::steady_clock::now();
+            auto tDelta = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+
+            records_[label].lineEnd_=lineEnd;
+            records_[label].time_end_.emplace_back(tEnd);
+            records_[label].time_usage_in_ms_.emplace_back(tDelta);
+            records_[label].state_=TimerRecord::State::STOP;
+        }
+    }
+    
+    void dumpIntoFile(const std::string &filePath)
+    {
+        std::string fileName;
+
+        for (const auto &iter : records_)
+        {
+            fileName = filePath + "/" + iter.first + ".txt";
+            std::ofstream ofs(fileName, std::ios::out);
+            if (!ofs.is_open())
+            {
+                // std::cout << ANSI_COLOR_RED_BOLD << "Failed to open file: " << file_name << std::endl;
+                RCLCPP_INFO_STREAM(logger_, "Failed to open file: " << fileName);
+                return;
+            }
+            else
+            {
+                // std::cout << ANSI_COLOR_GREEN_BOLD << "Dump Time Records into file: " << file_name << ANSI_COLOR_RESET << std::endl;
+                RCLCPP_INFO_STREAM(logger_, "Dump Time Records into file: " << fileName);
+            }
+            
+            ofs.setf(std::ios::fixed);
+            ofs << std::setprecision(std::numeric_limits<double>::max_digits10);
+
+            ofs << "Label:" << iter.first << ", Function:'" << iter.second.funcName_ << "' Line:" << iter.second.lineStart_ << "-" << iter.second.lineEnd_ << std::endl;
+            ofs << "Average time usage[ms]: " << iter.second.time_mean_in_ms_ << std::endl;
+            ofs << "Time usage[ms]      , " << "Time start[ms]              , " << "Time end[ms]" << std::endl;
+
+            for (int i=0; i<iter.second.time_usage_in_ms_.size(); i++)
+            {
+                ofs << iter.second.time_usage_in_ms_[i] << ", " 
+                    << std::chrono::duration<double, std::milli>(iter.second.time_start_[i].time_since_epoch()).count() << ", " 
+                    << std::chrono::duration<double, std::milli>(iter.second.time_end_[i].time_since_epoch()).count() << std::endl;
+            }
+
+            ofs.close();
+        }
+    }
+
+    void computeMeanTime()
+    {
+        for (auto &iter : records_)
+        {
+            if(iter.second.time_usage_in_ms_.size()==0)
+            {
+                break;
+            }
+            
+            iter.second.time_mean_in_ms_ = std::accumulate(iter.second.time_usage_in_ms_.begin(), iter.second.time_usage_in_ms_.end(), 0.0) / double(iter.second.time_usage_in_ms_.size());
+        }
+    }
+
+private:
+    rclcpp::Logger logger_;
+    std::map<std::string, TimerRecord> records_; // <record_label, TimerRecord Object> // should be unordered_map (hash map)?
+    std::mutex m_;
+};
 
 
 
