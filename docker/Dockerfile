@@ -73,17 +73,16 @@ RUN apt-get -y install ros-humble-grid-map-msgs ros-humble-grid-map
 # WORKDIR /sandbox/ysugano/Livox-SDK2/build
 # RUN cmake .. && make -j2 && make install
 
-# WORKDIR /sandbox/ysugano
-WORKDIR /sandbox
+WORKDIR /sandbox/ysugano
 RUN git clone http://github.com/strasdat/Sophus.git \
     && cd Sophus && git checkout 97e7161 \
     && mkdir build && cd build && cmake .. -DBUILD_TESTS=OFF \
     && make -j8 && sudo make install
 
-# WORKDIR /sandbox/ysugano
-WORKDIR /sandbox
+WORKDIR /sandbox/ysugano
 RUN git clone https://github.com/borglab/gtsam.git && \
-    cd gtsam && git checkout 4abef92 &&\
+    # cd gtsam && git checkout 4abef92 &&\
+    cd gtsam && git checkout 3ad4b4c &&\
     mkdir build && \
     cd build && \
     cmake  \
@@ -93,10 +92,16 @@ RUN git clone https://github.com/borglab/gtsam.git && \
     make -j6 && \
     sudo make install
 
-RUN pip install rerun-sdk
-RUN pip install numpy==1.24.3 matplotlib==3.7.1
-RUN pip install --upgrade packaging
-RUN pip3 install torch --ignore-installed
+WORKDIR /sandbox/ysugano
+RUN git clone https://github.com/Tessil/robin-map.git \
+    && cd robin-map && git checkout 4ec1bf1 \
+    && mkdir build && cd build && cmake .. -DBUILD_TESTS=OFF \
+    && make -j8 && sudo make install
+
+# RUN pip install rerun-sdk
+# RUN pip install numpy==1.24.3 matplotlib==3.7.1
+# RUN pip install --upgrade packaging
+# RUN pip3 install torch --ignore-installed
 
 USER ${USER} 
 WORKDIR /sandbox

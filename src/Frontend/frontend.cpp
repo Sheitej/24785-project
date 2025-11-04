@@ -4,17 +4,33 @@ namespace lo_dev
 {    
 
 // [TODO]: 
-// print everything that can be printed out
-// implement lo prior factor ver
-// look through the GTSAM sample code
+// Now that kiss-icp voxel map got to work (but still bad) to some extent
+// We need to improve the performance of the voxel map
+//  - GetClosestNNeighbors() is still slow -> should we use kdTree inside instead of std::nth_element
+//  - We can use multi-threads for point-plane distance calculation
+//  - We can look into other open-source code to see how to perform nn 5 pts search
+//  - Another thing is that voxel map is slow and odometry fails as well
+//      -> Is there any reason that makes ICP fail? 
+//      -> Since the only the difference is the NN search it should not be the difference on icp performance
+//      -> but voxel-based nn search is not exact nn search (actually yes it IS the exact search)
 
+// [NOTE]
+// - SolveLeastSquares() takes time a lot
+//      - preparingPointPlaneResidual actually takes time (more than half)
+//      - also num_icp_iteration directly affects the time and performance
+//          - if num_icp_iteration=10, large time, good performance
+//          - if num_icp_iteration=5,  real-time, poor performance
+
+// Fast-LIO ikd-Tree is really fast (NN-search would be very fast. Why?)
+
+// timeLogger_ does not work for voxel map for some reason 
 
 // Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options), timeLogger_(this->get_logger())
 // {
 // }
 
 Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options)
-{
+{   
 }
 
 bool Frontend::readParameters()
@@ -23,6 +39,32 @@ bool Frontend::readParameters()
     this->declare_parameter<bool>("frontend_node.set_main_process_timer", false);
     config_.set_main_process_timer = this->get_parameter("frontend_node.set_main_process_timer").as_bool();
     RCLCPP_INFO_STREAM(get_logger(), "set_main_process_timer: " << config_.set_main_process_timer);
+
+    // ---- parameters for voxel map ---- 
+    this->declare_parameter<bool>("frontend_node.use_voxel_map", false);
+    this->declare_parameter<double>("frontend_node.voxel_size", 0.5);
+    this->declare_parameter<double>("frontend_node.voxel_max_distance", 100.0);
+    this->declare_parameter<int>("frontend_node.max_points_per_voxel", 20);
+    this->declare_parameter<bool>("frontend_node.turn_on_voxel_downsample", true);
+    this->declare_parameter<double>("frontend_node.voxel_downsample_resolution_raw_to_mapping", 0.5);
+    this->declare_parameter<double>("frontend_node.voxel_downsample_resolution_mapping_to_icpsource", 0.5);
+    this->declare_parameter<double>("frontend_node.threshold_voxel_nn_search_radius", 1.5);
+    config_.use_voxel_map= this->get_parameter("frontend_node.use_voxel_map").as_bool();
+    config_.voxel_size= this->get_parameter("frontend_node.voxel_size").as_double();
+    config_.voxel_max_distance= this->get_parameter("frontend_node.voxel_max_distance").as_double();
+    config_.max_points_per_voxel= static_cast<unsigned int>(this->get_parameter("frontend_node.max_points_per_voxel").as_int());
+    config_.turn_on_voxel_downsample = this->get_parameter("frontend_node.turn_on_voxel_downsample").as_bool();
+    config_.voxel_downsample_resolution_raw_to_mapping = this->get_parameter("frontend_node.voxel_downsample_resolution_raw_to_mapping").as_double();
+    config_.voxel_downsample_resolution_mapping_to_icpsource = this->get_parameter("frontend_node.voxel_downsample_resolution_mapping_to_icpsource").as_double();
+    config_.threshold_voxel_nn_search_radius = this->get_parameter("frontend_node.threshold_voxel_nn_search_radius").as_double();
+    RCLCPP_INFO_STREAM(get_logger(), "use_voxel_map: " << config_.use_voxel_map);
+    RCLCPP_INFO_STREAM(get_logger(), "voxel_size: " << config_.voxel_size);
+    RCLCPP_INFO_STREAM(get_logger(), "voxel_max_distance: " << config_.voxel_max_distance);
+    RCLCPP_INFO_STREAM(get_logger(), "max_points_per_voxel: " << config_.max_points_per_voxel);
+    RCLCPP_INFO_STREAM(get_logger(), "turn_on_voxel_downsample: " << config_.turn_on_voxel_downsample);
+    RCLCPP_INFO_STREAM(get_logger(), "voxel_downsample_resolution_raw_to_mapping: " << config_.voxel_downsample_resolution_raw_to_mapping);
+    RCLCPP_INFO_STREAM(get_logger(), "voxel_downsample_resolution_mapping_to_icpsource: " << config_.voxel_downsample_resolution_mapping_to_icpsource);
+    RCLCPP_INFO_STREAM(get_logger(), "threshold_voxel_nn_search_radius: " << config_.threshold_voxel_nn_search_radius);
 
     // ---- parameters for preprocessing ---- 
     this->declare_parameter<float>("frontend_node.acc_n", 1e-3);
@@ -131,6 +173,10 @@ bool Frontend::readParameters()
 
 void Frontend::initializeInterface()
 {
+    // // check OpenMP
+    // #pragma omp parallel
+    // std::cout << "Hello from thread " << omp_get_thread_num() << " / " << omp_get_num_threads() << std::endl;
+
     // get the config parameters
     if(!readGlobalparam(shared_from_this()))
     {
@@ -241,8 +287,8 @@ void Frontend::initializeInterface()
     cloudScanCurr_.reset(new pcl::PointCloud<PointType>());
     cloudScanCurrDs_.reset(new pcl::PointCloud<PointType>());
     cloudCurrentScanInWorld_.reset(new pcl::PointCloud<PointType>());
-    pointScanCurrForResidual_.reset(new pcl::PointCloud<PointType>());
-    planeNormDistForResidual_.reset(new pcl::PointCloud<PointType>());
+    // pointScanCurrForResidual_.reset(new pcl::PointCloud<PointType>());
+    // planeNormDistForResidual_.reset(new pcl::PointCloud<PointType>());
     const double size = config_.voxel_filter_size;
     downsizeFilterScanCurr_.setLeafSize(size, size, size);
     downsizeFilterMapLocal_.setLeafSize(size, size, size); //config_.voxel_filter_size
@@ -286,6 +332,13 @@ void Frontend::initializeInterface()
     timeLogger_.setLogger(get_logger());
 
     // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    // initialize voxel map
+    voxelMap_.Initialize(config_.voxel_size, config_.voxel_max_distance, config_.max_points_per_voxel);
+
+    // check num. of threads available for parallel threading
+    RCLCPP_INFO_STREAM(this->get_logger(), "Max threads OpenMP may use: " << omp_get_max_threads());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Number of processors: " << omp_get_num_procs());
 }
 
 void Frontend::synchronizeMeasurements()
@@ -674,11 +727,14 @@ void Frontend::getImuPoseAtPointMeasurementTime(double pointTime, Eigen::Quatern
 
 void Frontend::initializeCloudMap()
 {
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     RCLCPP_INFO_STREAM(this->get_logger(), "Initializing a global cloud map.");
     RCLCPP_INFO_STREAM(this->get_logger(), "cloudScanCurr_->points.size() = " << cloudScanCurr_->points.size());
 
     pcl::PointCloud<PointType>::Ptr cloudInW;
     cloudInW.reset(new pcl::PointCloud<PointType>());
+    // convert point cloud to the world frame 
     for (auto& pt: cloudScanCurr_->points)
     {
         PointType ptInW;
@@ -686,7 +742,54 @@ void Frontend::initializeCloudMap()
         cloudInW->points.push_back(ptInW);
     }
 
-    cloudFramesMapGlobal_.push_back(cloudInW);
+    if(config_.use_voxel_map)
+    {
+        // TODO //
+        // set cloudInW to voxelMap_  
+        // should we downsample the cloud?
+        // frame_downsample = VoxelDownsample(cloudInW, config_.voxel_size);
+        // voxelMap_.Update(frame_downsample, new_pose);
+        std::vector<Eigen::Vector3d> cloudVecEig;
+        for (auto& pt: cloudInW->points)
+        {
+            Eigen::Vector3d ptEig(pt.x, pt.y, pt.z);
+            cloudVecEig.emplace_back(ptEig);
+        }
+
+        std::vector<Eigen::Vector3d> cloudVecEigDs;
+
+        // voxel downsample on 
+        if (config_.turn_on_voxel_downsample)
+        {
+            // cloudVecEigDs = VoxelDownsample(cloudVecEig, config_.voxel_size * 0.5);
+            cloudVecEigDs = VoxelDownsample(cloudVecEig, config_.voxel_size * config_.voxel_downsample_resolution_mapping_to_icpsource);
+        }
+        else // voxel downsample off
+        {
+            cloudVecEigDs = cloudVecEig;
+        }
+
+        // update the map
+        if (debug_print_num_point_in_voxel_map)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << " before update: voxelMap.size() = " << voxelMap_.Pointcloud().size());
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << "     added cloudVecEigDs.size() = " << cloudVecEigDs.size());
+        }
+        voxelMap_.Update(cloudVecEigDs, t_w_bCurrKf_);
+
+        if (debug_print_num_point_in_voxel_map)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << " after update: voxelMap.size() = " << voxelMap_.Pointcloud().size());
+        }
+
+        if(debug_dump_log_file_voxel_ids)
+            voxelMap_.DumpVoxelCorrdinates(timeCurrScanBeg_);
+    }
+    else
+    {
+        // We should downsample point cloud here
+        cloudFramesMapGlobal_.push_back(cloudInW);
+    }
 }
 
 void Frontend::transformPointToWorldFrame(const PointType&  pi, PointType& po) 
@@ -754,55 +857,128 @@ void Frontend::buildLocalMap()
 {
     cloudMapLocal_->clear();
 
-    const size_t nCloudInMap = cloudFramesMapGlobal_.size();
-    // const size_t maxCloudToTake = 20;
-    const size_t maxCloudToTake = config_.max_cloud_frame_for_local_map;
-    const size_t nCloudToTake = std::min(nCloudInMap, maxCloudToTake);
-
-    if(!config_.build_local_map_from_all_global_map) // if extracting all the points to build a local map in the global map
+    if(config_.use_voxel_map)
     {
-        for (size_t i=0; i<nCloudToTake; ++i) 
-        {
-            *cloudMapLocal_ += *cloudFramesMapGlobal_[(nCloudInMap-1) - i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
-        }
+        // TODO //
+        // the local map is exactly voxelMap_, so we don't have to do anything here (It's already build in the process)
+        // in solveLeastSquares(), we need to use voxelMap_ for nn search
     }
     else
     {
-        for (size_t i=0; i<nCloudInMap; ++i)  // if extracting some of the recent points to build a local map in the global map
-        {
-            *cloudMapLocal_ += *cloudFramesMapGlobal_[i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
-        } 
-    }
+        const size_t nCloudInMap = cloudFramesMapGlobal_.size();
+        // const size_t maxCloudToTake = 20;
+        const size_t maxCloudToTake = config_.max_cloud_frame_for_local_map;
+        const size_t nCloudToTake = std::min(nCloudInMap, maxCloudToTake);
 
-    // for debugging
-    if (debug_print_cloud_map_size)
-    {
-        RCLCPP_WARN_STREAM(get_logger(), "cloudFramesMapGlobal_.size() = " << cloudFramesMapGlobal_.size());
-        RCLCPP_WARN_STREAM(get_logger(), "cloudMapLocal_->points.size() = " << cloudMapLocal_->points.size());
+        if(!config_.build_local_map_from_all_global_map) // if extracting all the points to build a local map in the global map
+        {
+            for (size_t i=0; i<nCloudToTake; ++i) 
+            {
+                *cloudMapLocal_ += *cloudFramesMapGlobal_[(nCloudInMap-1) - i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
+            }
+        }
+        else
+        {
+            for (size_t i=0; i<nCloudInMap; ++i)  // if extracting some of the recent points to build a local map in the global map
+            {
+                *cloudMapLocal_ += *cloudFramesMapGlobal_[i]; // idx: (nCloudInMap-1), (nCloudInMap-1)-1, ...
+            } 
+        }
+
+        // for debugging
+        if (debug_print_cloud_map_size)
+        {
+            RCLCPP_WARN_STREAM(get_logger(), "cloudFramesMapGlobal_.size() = " << cloudFramesMapGlobal_.size());
+            RCLCPP_WARN_STREAM(get_logger(), "cloudMapLocal_->points.size() = " << cloudMapLocal_->points.size());
+        }
     }
 }
 
 void Frontend::downsampleCloud() 
 {
-    downsizeFilterMapLocal_.setInputCloud(cloudMapLocal_);
-    cloudMapLocalDs_->clear();
-    downsizeFilterMapLocal_.filter(*cloudMapLocalDs_);
-    // std::swap(cloudMapLocalDs_, cloudMapLocal_); // what if we don't downsample localCloudMap??
-    // -> the computation for downsampleCloud() drastically decreased
-
-
     // for debugging
-    if(debug_print_first_point_in_current_scan)
+    if (debug_print_num_downsampled_point)
+        RCLCPP_WARN_STREAM(get_logger(), "before downsample num.point = " << cloudScanCurr_->points.size());
+
+    if(config_.use_voxel_map)
     {
-        RCLCPP_INFO_STREAM(this->get_logger(), __FUNCTION__ << __LINE__);
-        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].x: " << cloudScanCurr_->points[0].x);
-        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].y: " << cloudScanCurr_->points[0].y);
-        RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].z: " << cloudScanCurr_->points[0].z);
+        // TODO //
+        // We don't have to build cloudMapLocalDs_ since it's exactly voxelMap_ which is already downsampled
+        // We have to update cloudScanCurrDs_ based on VoxelDownsample(cloudScanCurr_, config_.voxel_size)
+
+        // convert the cloudScanCurr_ to std::vector<Eigen::Vector3d>
+        std::vector<Eigen::Vector3d> cloudScanCurr_vecEigen;
+        for (auto& pt: cloudScanCurr_->points)
+        {
+            Eigen::Vector3d ptEig(pt.x, pt.y, pt.z);
+            cloudScanCurr_vecEigen.emplace_back(ptEig);
+        }
+
+        // voxel downsample on 
+        if(config_.turn_on_voxel_downsample)
+        {
+            // cloudScanCurrDs_vecEigen_ = VoxelDownsample(cloudScanCurr_vecEigen, config_.voxel_size * 0.5);
+            // following kiss-icp parameter
+            cloudScanCurrDsToMap_vecEigen_ = VoxelDownsample(cloudScanCurr_vecEigen, config_.voxel_size * config_.voxel_downsample_resolution_raw_to_mapping);
+            cloudScanCurrDs_vecEigen_ = VoxelDownsample(cloudScanCurrDsToMap_vecEigen_, config_.voxel_size * config_.voxel_downsample_resolution_mapping_to_icpsource);
+            
+            // check the number
+            if (debug_print_num_downsampled_point)
+                RCLCPP_WARN_STREAM(get_logger(), "cloudScanCurrDsToMap_vecEigen_ num.point = " << cloudScanCurrDsToMap_vecEigen_.size());
+        }
+        else // voxel downsample off
+        {
+            cloudScanCurrDs_vecEigen_ = cloudScanCurr_vecEigen; 
+        }
+
+        // keep a debugging code
+        // // JUST for debugging: add the current scan to the voxel map before NN search to see NN search works well
+        // for (auto& ptEig: cloudScanCurrDs_vecEigen_)
+        // {
+        //     Eigen::Vector3d t_w_pt = q_w_bCurrKf_ * ptEig + t_w_bCurrKf_;
+        //     cloudScanCurrInWorld_vecEigen_.push_back(t_w_pt);
+        // }
+        // voxelMap_.Update(cloudScanCurrInWorld_vecEigen_, t_w_bCurrKf_);
+        // cloudScanCurrInWorld_vecEigen_.clear();
+        // // JUST for debugging
+
+
+        // convert std::vector<Eigen::Vector3d> back to cloudScanCurrDs_
+        cloudScanCurrDs_->clear();
+        for (auto& ptEig: cloudScanCurrDs_vecEigen_)
+        {
+            PointType pt;
+            pt.x = ptEig.x();
+            pt.y = ptEig.y();
+            pt.z = ptEig.z();
+            cloudScanCurrDs_->points.emplace_back(pt);
+        }
+    }
+    else // naive pcl::pointcloud map ver.
+    {
+        downsizeFilterMapLocal_.setInputCloud(cloudMapLocal_);
+        cloudMapLocalDs_->clear();
+        downsizeFilterMapLocal_.filter(*cloudMapLocalDs_);
+        // std::swap(cloudMapLocalDs_, cloudMapLocal_); // what if we don't downsample localCloudMap??
+        // -> the computation for downsampleCloud() drastically decreased
+
+        // for debugging
+        if(debug_print_first_point_in_current_scan)
+        {
+            RCLCPP_INFO_STREAM(this->get_logger(), __FUNCTION__ << __LINE__);
+            RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].x: " << cloudScanCurr_->points[0].x);
+            RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].y: " << cloudScanCurr_->points[0].y);
+            RCLCPP_INFO_STREAM(this->get_logger(), "  cloudScanCurr_->points[0].z: " << cloudScanCurr_->points[0].z);
+        }
+
+        downsizeFilterScanCurr_.setInputCloud(cloudScanCurr_);
+        cloudScanCurrDs_->clear();
+        downsizeFilterScanCurr_.filter(*cloudScanCurrDs_);
     }
 
-    downsizeFilterScanCurr_.setInputCloud(cloudScanCurr_);
-    cloudScanCurrDs_->clear();
-    downsizeFilterScanCurr_.filter(*cloudScanCurrDs_);
+    // for debugging
+    if (debug_print_num_downsampled_point)
+        RCLCPP_WARN_STREAM(get_logger(), "after downsample num.point = " << cloudScanCurrDs_->points.size());
 
     // for debugging
     if(debug_print_first_point_in_current_scan)
@@ -816,8 +992,17 @@ void Frontend::downsampleCloud()
 
 void Frontend::solveLeastSquares()
 {
-    // set the local map point cloud to the kd_tree to nearest neighbor search
-    kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    if(!config_.use_voxel_map)
+    {
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+    }
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // create pose parameters variables to optimize in Ceres solver    
     // pose representation: [quaternion: w, x, y, z | transition: x, y, z]
@@ -835,6 +1020,8 @@ void Frontend::solveLeastSquares()
         t_w_bCurrKf_.y(),
         t_w_bCurrKf_.z()
     };
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // ICP iteration (point-to-plane)
     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
@@ -862,6 +1049,8 @@ void Frontend::solveLeastSquares()
         //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
         //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
         // compute necessary values for point-to-plane residual computation
         // this is a praparation for the objective function in the least squares, later added to the problem by AddResidualBlock()
@@ -872,28 +1061,34 @@ void Frontend::solveLeastSquares()
         // d:the distance from the world origin to the plane -> normal.intensity in surf_normal
         timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         // for debugging
         if (debug_print_num_residuals) 
+        {
+            std::cout << "num. of pts nn found = " << numPtsNnFound_ << std::endl;
             std::cout << "num. of residual points = " << numResidual_ << std::endl;
+        }
 
         // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
         for (int i = 0; i < numResidual_; ++i) 
         {
             // set x:the point position
-            Eigen::Vector3d currentPt(pointScanCurrForResidual_->points[i].x,
-                                        pointScanCurrForResidual_->points[i].y,
-                                        pointScanCurrForResidual_->points[i].z);
+            // Eigen::Vector3d currentPt(pointScanCurrForResidual_->points[i].x,
+            //                             pointScanCurrForResidual_->points[i].y,
+            //                             pointScanCurrForResidual_->points[i].z);
+            Eigen::Vector3d currentPt = pointScanCurrForResidual_[i]; // Eigen::Vector3d ver.
             // here currentPt is a measured point in the body frame and the transformation from body to world is done in LidarPlaneNormIncreFactor
             // note that we have to give the point position in BODY to allow Ceres to examine the loss change w.r.t. the transformation increment in LidarPlaneNormIncreFactor
             
             // set n:the normal
-            Eigen::Vector3d norm(planeNormDistForResidual_->points[i].x,
-                                    planeNormDistForResidual_->points[i].y,
-                                    planeNormDistForResidual_->points[i].z);
-
+            // Eigen::Vector3d norm(planeNormDistForResidual_->points[i].x,
+            //                         planeNormDistForResidual_->points[i].y,
+            //                         planeNormDistForResidual_->points[i].z);
+            Eigen::Vector3d norm = planeNormDistForResidual_[i];
             // set d:distance from the world origin to the plane(=norm inverse)
-            double normInverse = planeNormDistForResidual_->points[i].intensity; // this is the weighted distance from the origin to the plane
-
+            // double normInverse = planeNormDistForResidual_->points[i].intensity; // this is the weighted distance from the origin to the plane
+            double normInverse = pointPlaneDistForResidual_[i]; // Eigen::Vector3d ver.
             // set cost function (residual) based on x,n,d
             // point-to-plane residual (=nx+d) will be computed in the cost function (LidarPlaneNormIncreFactor)
             // one point corresponds to one residual(cost function) 
@@ -905,6 +1100,8 @@ void Frontend::solveLeastSquares()
             // ResidualBlockId Problem::AddResidualBlock(CostFunction *cost_function, LossFunction *loss_function, const std::vector<double*> parameter_blocks)
         }
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         // set some solver parameters
         ceres::Solver::Options solverOptions;
         solverOptions.linear_solver_type = ceres::DENSE_QR;
@@ -914,6 +1111,8 @@ void Frontend::solveLeastSquares()
         solverOptions.check_gradients = false;
         solverOptions.gradient_check_relative_precision = 1e-2;
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         // create a solution container
         ceres::Solver::Summary summary;
 
@@ -921,6 +1120,8 @@ void Frontend::solveLeastSquares()
         // solve the least squares for this round in ICP
         ceres::Solve(solverOptions, &problem, &summary);
         timeLogger_.stop("ceres::Solve", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
         // make sure w in rotation quaternion is positive (carried over from liliom)
         // this might not be necesary but keep it just in case
@@ -937,8 +1138,9 @@ void Frontend::solveLeastSquares()
             icpPoseParam[3] = tmpQ.z();
         }
 
-        pointScanCurrForResidual_->clear();
-        planeNormDistForResidual_->clear();
+        pointScanCurrForResidual_.clear();
+        planeNormDistForResidual_.clear();
+        pointPlaneDistForResidual_.clear();
 
         // update the pose variables to the latest optimized ones
         // icpPoseParam[] is what is being optimized in the Ceres process above
@@ -957,68 +1159,99 @@ void Frontend::solveLeastSquares()
     // end of the point-to-plane icp
 }
 
-void Frontend::preparePointPlaneResidual() 
+void Frontend::preparePointPlaneResidual()  // This process can be a parallel process???
 {
-    numResidual_=0;
+    numPtsNnFound_ = 0;
+    numResidual_ = 0; 
 
-    for (size_t i=0; i<cloudScanCurrDs_->points.size(); ++i) 
+    const size_t num_pts_curr = cloudScanCurrDs_->points.size();
+    pointScanCurrForResidual_.resize(num_pts_curr);
+    planeNormDistForResidual_.resize(num_pts_curr);
+    pointPlaneDistForResidual_.resize(num_pts_curr);
+    std::vector<bool> valid(num_pts_curr, false);
+
+// #pragma omp parallel for num_threads(8) schedule(static)
+#pragma omp parallel for
+    for (size_t i = 0; i < num_pts_curr; ++i) 
     {
-        PointType point_sel;
+        PointType point_curr_scan_inw;    // should be point_curr_scan
+        PointType point_curr_scan_inb = cloudScanCurrDs_->points[i];
 
-        transformPointToWorldFrame(cloudScanCurrDs_->points[i], point_sel);
-        // cloudScanCurrDs_ is in body frame
-        // point_sel is in world frame
+        transformPointToWorldFrame(point_curr_scan_inb, point_curr_scan_inw);
 
         // for debugging
         if(debug_print_point_plane_residual_preparation)
         {
             RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-            RCLCPP_INFO_STREAM(get_logger(), "point_sel:");
-            RCLCPP_INFO_STREAM(get_logger(), "  x: " << point_sel.x);
-            RCLCPP_INFO_STREAM(get_logger(), "  y: " << point_sel.y);
-            RCLCPP_INFO_STREAM(get_logger(), "  z: " << point_sel.z);
-            RCLCPP_INFO_STREAM(get_logger(), "cloudScanCurrDs_->points[i]:");
-            RCLCPP_INFO_STREAM(get_logger(), "  x: " << cloudScanCurrDs_->points[i].x);
-            RCLCPP_INFO_STREAM(get_logger(), "  y: " << cloudScanCurrDs_->points[i].y);
-            RCLCPP_INFO_STREAM(get_logger(), "  z: " << cloudScanCurrDs_->points[i].z);
+            RCLCPP_INFO_STREAM(get_logger(), "point_curr_scan_inw:");
+            RCLCPP_INFO_STREAM(get_logger(), "  x: " << point_curr_scan_inw.x);
+            RCLCPP_INFO_STREAM(get_logger(), "  y: " << point_curr_scan_inw.y);
+            RCLCPP_INFO_STREAM(get_logger(), "  z: " << point_curr_scan_inw.z);
+            RCLCPP_INFO_STREAM(get_logger(), "point_curr_scan_inb:");
+            RCLCPP_INFO_STREAM(get_logger(), "  x: " << point_curr_scan_inb.x);
+            RCLCPP_INFO_STREAM(get_logger(), "  y: " << point_curr_scan_inb.y);
+            RCLCPP_INFO_STREAM(get_logger(), "  z: " << point_curr_scan_inb.z);
         }
 
-        std::vector<int> point_search_idx;
-        std::vector<float> point_search_dists;
+        std::vector<int> neighbor_ids;
+        std::vector<float> neighbor_dists;
+        std::vector<Eigen::Vector3d> neighbors;
 
-        // search 5 points from kd_tree via NN search
-        kdTreeMapLocal_->nearestKSearch(point_sel, 5, point_search_idx, point_search_dists);
+        if(config_.use_voxel_map)
+        {
+            Eigen::Vector3d query(point_curr_scan_inw.x, point_curr_scan_inw.y, point_curr_scan_inw.z);
+            voxelMap_.GetClosestNNeighbors(query, 5, neighbors, neighbor_dists, config_.threshold_voxel_nn_search_radius);
+
+            // [Threshold] num. of neighborhoods found
+            if (neighbors.size() != 5 || neighbor_dists.size() != 5) continue; 
+        }
+        else
+        {
+            kdTreeMapLocal_->nearestKSearch(point_curr_scan_inw, 5, neighbor_ids, neighbor_dists); // PCL nearestKSearch typically returns squared distances?
+
+            for (size_t j=0; j<neighbor_ids.size(); j++)
+            {
+                Eigen::Vector3d pt(
+                    cloudMapLocalDs_->points[neighbor_ids[j]].x, 
+                    cloudMapLocalDs_->points[neighbor_ids[j]].y, 
+                    cloudMapLocalDs_->points[neighbor_ids[j]].z);
+                neighbors.push_back(pt);
+            }
+        }
+        
+#pragma omp atomic
+        numPtsNnFound_++;   // just for debugging
 
         Eigen::Matrix<double, 5, 3> matA0;
         Eigen::Matrix<double, 5, 1> matB0 = - Eigen::Matrix<double, 5, 1>::Ones();
-
-        // extract a plane and compute point-to-plane residual
-        if (point_search_dists[4] < 1.0) 
+ 
+        // [Threshold] Point-to-Plane distance
+        if (neighbor_dists[4] < 1.0) 
         {
-            PointType center;
+            PointType center;       // not used currently
 
             for (int j = 0; j < 5; ++j) 
             {
-                matA0(j, 0) = cloudMapLocalDs_->points[point_search_idx[j]].x;
-                matA0(j, 1) = cloudMapLocalDs_->points[point_search_idx[j]].y;
-                matA0(j, 2) = cloudMapLocalDs_->points[point_search_idx[j]].z;
-
+                matA0(j, 0) = neighbors[j].x();
+                matA0(j, 1) = neighbors[j].y();
+                matA0(j, 2) = neighbors[j].z();
+                
                 // for debugging
                 if(debug_print_point_plane_residual_preparation)
                 {
                     RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
                     RCLCPP_INFO_STREAM(get_logger(), "NN search result ----");
-                    RCLCPP_INFO_STREAM(get_logger(), "cloudMapLocalDs_->points[point_search_idx[j]]:");
-                    RCLCPP_INFO_STREAM(get_logger(), "  x: " << cloudMapLocalDs_->points[point_search_idx[j]].x);
-                    RCLCPP_INFO_STREAM(get_logger(), "  y: " << cloudMapLocalDs_->points[point_search_idx[j]].y);
-                    RCLCPP_INFO_STREAM(get_logger(), "  z: " << cloudMapLocalDs_->points[point_search_idx[j]].z);
+                    RCLCPP_INFO_STREAM(get_logger(), "point_search_voxel:");
+                    RCLCPP_INFO_STREAM(get_logger(), "  x: " << neighbors[j].x());
+                    RCLCPP_INFO_STREAM(get_logger(), "  y: " << neighbors[j].y());
+                    RCLCPP_INFO_STREAM(get_logger(), "  z: " << neighbors[j].z());
                 }
             }
 
             // solve linear system to extract a plane normal vector (this is also a least squares)
             // get the norm of the plane using linear solver based on QR composition
             Eigen::Vector3d norm = matA0.colPivHouseholderQr().solve(matB0);
-            double normInverse = 1 / norm.norm(); // =d:distance from the plane to the origin
+            double normInverse = 1 / norm.norm(); // = d:distance from the plane to the origin
             norm.normalize(); // get the unit norm
 
             // Compute the centroid of the plane
@@ -1027,14 +1260,14 @@ void Frontend::preparePointPlaneResidual()
             center.z = matA0.col(2).sum() / 5.0;
             // Actually these are not used
 
-            // Make sure that the plane is fit
+            // [Threshold] Planarity: make sure that the plane is fit well
             // check the distance between the 5 map points and the plane
             bool planeValid = true;
             for (int j = 0; j < 5; ++j) 
             {
-                if (fabs(norm.x() * cloudMapLocalDs_->points[point_search_idx[j]].x +
-                        norm.y() * cloudMapLocalDs_->points[point_search_idx[j]].y +
-                        norm.z() * cloudMapLocalDs_->points[point_search_idx[j]].z + normInverse) > 0.06) 
+                if (fabs(norm.x() * neighbors[j].x() +
+                         norm.y() * neighbors[j].y() +
+                         norm.z() * neighbors[j].z() + normInverse) > 0.06) 
                 {
                     planeValid = false;
                     break;
@@ -1045,9 +1278,12 @@ void Frontend::preparePointPlaneResidual()
             if (planeValid) 
             {
                 // compute point-plane distance (n.x + d)
-                float pd = norm.x() * point_sel.x + norm.y() * point_sel.y + norm.z() * point_sel.z + normInverse;
+                float pd = norm.x() * point_curr_scan_inw.x 
+                         + norm.y() * point_curr_scan_inw.y 
+                         + norm.z() * point_curr_scan_inw.z 
+                         + normInverse;
                 // compute a weight for a point based on the point-plane distance
-                float weight = 1 - 0.9 * fabs(pd) / sqrt(sqrt(point_sel.x * point_sel.x + point_sel.y * point_sel.y + point_sel.z * point_sel.z));
+                float weight = 1 - 0.9 * fabs(pd) / sqrt(sqrt(point_curr_scan_inw.x * point_curr_scan_inw.x + point_curr_scan_inw.y * point_curr_scan_inw.y + point_curr_scan_inw.z * point_curr_scan_inw.z));
 
                 // if the weight exceeds the threshold, store the points and normal into the residual container
                 // This is just for computing weighted normal, plane-origin distance, which is used for residual computation in LidarPlaneNormIncreFactor cost function
@@ -1062,14 +1298,16 @@ void Frontend::preparePointPlaneResidual()
                         normal.y = norm.y();
                         normal.z = norm.z();
                         normal.intensity = normInverse;
-                        pointScanCurrForResidual_->push_back(cloudScanCurrDs_->points[i]);
-                        planeNormDistForResidual_->push_back(normal);
+                        Eigen::Vector3d point_eig(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
+                        Eigen::Vector3d normal_eig(norm.x(), norm.y(), norm.z());
+                        pointScanCurrForResidual_[i] = point_eig;
+                        planeNormDistForResidual_[i] = normal_eig;
+                        pointPlaneDistForResidual_[i] = normInverse;
+                        valid[i] = true;
 
                         // for debugging
                         if(debug_print_point_plane_residual_preparation)
                             RCLCPP_INFO_STREAM(get_logger(), "direct point-to-plane distance (pd): " << pd);
-
-                        ++numResidual_;
                     }
                 }
                 else 
@@ -1081,14 +1319,16 @@ void Frontend::preparePointPlaneResidual()
                         normal.y = weight * norm.y();
                         normal.z = weight * norm.z();
                         normal.intensity = weight * normInverse;
-                        pointScanCurrForResidual_->push_back(cloudScanCurrDs_->points[i]);
-                        planeNormDistForResidual_->push_back(normal);
+                        Eigen::Vector3d point_eig(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
+                        Eigen::Vector3d normal_eig(norm.x(), norm.y(), norm.z());
+                        pointScanCurrForResidual_[i] = point_eig;
+                        planeNormDistForResidual_[i] = normal_eig;
+                        pointPlaneDistForResidual_[i] = normInverse;
+                        valid[i] = true;
 
                         // for debugging
                         if(debug_print_point_plane_residual_preparation)
                             RCLCPP_INFO_STREAM(get_logger(), "direct point-to-plane distance (pd): " << pd);
-
-                        ++numResidual_;
                     }
                 }
 
@@ -1100,6 +1340,27 @@ void Frontend::preparePointPlaneResidual()
             }
         }
     }
+
+    // fit the size of the vector to that only for non-zero values
+    std::vector<Eigen::Vector3d> pts_compact;
+    std::vector<Eigen::Vector3d> normals_compact;
+    std::vector<double> dists_compact;
+    pts_compact.reserve(num_pts_curr);
+    normals_compact.reserve(num_pts_curr);
+    dists_compact.reserve(num_pts_curr);
+    for (std::size_t i = 0; i < num_pts_curr; ++i) 
+    {
+        if (valid[i]) 
+        { 
+            pts_compact.push_back(pointScanCurrForResidual_[i]);
+            normals_compact.push_back(planeNormDistForResidual_[i]); 
+            dists_compact.push_back(pointPlaneDistForResidual_[i]); 
+        }
+    }
+    pointScanCurrForResidual_.swap(pts_compact);
+    planeNormDistForResidual_.swap(normals_compact);
+    pointPlaneDistForResidual_.swap(dists_compact);
+    numResidual_ = static_cast<int>(planeNormDistForResidual_.size());
 }
 
 void Frontend::updatePoseLO()
@@ -1120,7 +1381,7 @@ void Frontend::updatePoseLO()
 
 void Frontend::run()
 {
-    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << " : " << "t= " << timeCurrScanBeg_);
 
     // check if any measurement data available
     // mtxImu_.lock();
@@ -1144,68 +1405,98 @@ void Frontend::run()
     }
     timeLogger_.start("run", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     // // ----- pre-process ----- 
     timeLogger_.start("synchronizeMeasurements", __FUNCTION__, __LINE__);
     synchronizeMeasurements();
     timeLogger_.stop("synchronizeMeasurements", __FUNCTION__,__LINE__);
 
-    timeLogger_.start("initializeImu", __FUNCTION__, __LINE__);
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     if(!isImuInitialized_)
     {
+        timeLogger_.start("initializeImu", __FUNCTION__, __LINE__);
+
         initializeImu();
         isImuInitialized_ = true;
+
+        timeLogger_.stop("initializeImu", __FUNCTION__, __LINE__);
     }
-    timeLogger_.stop("initializeImu", __FUNCTION__, __LINE__);
     
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("propagateImu", __FUNCTION__, __LINE__);
     propagateImu();
     timeLogger_.stop("propagateImu", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     timeLogger_.start("transformPointCloudInImuFrame", __FUNCTION__, __LINE__);
     transformPointCloudInImuFrame();
     timeLogger_.stop("transformPointCloudInImuFrame", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("makeInitialGuess", __FUNCTION__, __LINE__);
     makeInitialGuess();
     timeLogger_.stop("makeInitialGuess", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     timeLogger_.start("deskewPointCloud", __FUNCTION__, __LINE__);
     deskewPointCloud();
     timeLogger_.stop("deskewPointCloud", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // ----- lidar odometry ----- 
-    timeLogger_.start("initializeCloudMap", __FUNCTION__, __LINE__);
     if(!isCloudMapInitialized_)
     {
+        timeLogger_.start("initializeCloudMap", __FUNCTION__, __LINE__);
+    
         initializeCloudMap();
         isCloudMapInitialized_ = true;
         clearProcess();
         isProcessing_.store(false);
+
+        timeLogger_.stop("initializeCloudMap", __FUNCTION__, __LINE__);
+
+        timeLogger_.stop("run", __FUNCTION__, __LINE__);
         return;
     }
-    timeLogger_.stop("initializeCloudMap", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     timeLogger_.start("setInitialPose", __FUNCTION__, __LINE__);
     setInitialPose();
     timeLogger_.stop("setInitialPose", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("buildLocalMap", __FUNCTION__, __LINE__);
     buildLocalMap();
     timeLogger_.stop("buildLocalMap", __FUNCTION__, __LINE__);
     
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("downsampleCloud", __FUNCTION__, __LINE__);
     downsampleCloud();
     timeLogger_.stop("downsampleCloud", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     timeLogger_.start("solveLeastSquares", __FUNCTION__, __LINE__);
     solveLeastSquares();
     timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
     
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("updatePoseLO", __FUNCTION__, __LINE__);
     updatePoseLO();
     timeLogger_.stop("updatePoseLO", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     //  ----- factor graph optimization ----- 
     if(config_.turn_on_factor_graph == true)
@@ -1238,20 +1529,27 @@ void Frontend::run()
         // }
     }
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     //  ----- post-process ----- 
     timeLogger_.start("transformPointCloudInWorldFrame", __FUNCTION__, __LINE__);
     transformPointCloudInWorldFrame();
     timeLogger_.stop("transformPointCloudInWorldFrame", __FUNCTION__, __LINE__);
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     // publish ROS2 message for visualization
     publishOdometry();
     publishCloud();
     publishTf();
 
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     timeLogger_.start("updateCloudMap", __FUNCTION__, __LINE__);
     updateCloudMap();
     timeLogger_.stop("updateCloudMap", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     clearProcess();
 
@@ -1309,16 +1607,36 @@ void Frontend::transformPointCloudInWorldFrame()
     }
 
     // Only add downsampled cloud to map
-    for (auto point: cloudScanCurrDs_->points)
+    if(config_.use_voxel_map)
     {
-        Eigen::Vector3d t_b_pt(point.x, point.y, point.z);
-        Eigen::Vector3d t_w_pt = q_w_bCurrKf_ * t_b_pt + t_w_bCurrKf_;
+        // for (auto& ptEig: cloudScanCurrDs_vecEigen_)
+        for (auto& ptEig: cloudScanCurrDsToMap_vecEigen_)
+        {
+            // Eigen::Vector3d t_b_pt(point.x, point.y, point.z);
+            Eigen::Vector3d t_w_pt = q_w_bCurrKf_ * ptEig + t_w_bCurrKf_;
 
-        PointType ptInW;
-        ptInW.x = t_w_pt.x();
-        ptInW.y = t_w_pt.y();
-        ptInW.z = t_w_pt.z();
-        cloudCurrentScanInWorld_->points.push_back(ptInW);
+            cloudScanCurrInWorld_vecEigen_.push_back(t_w_pt);
+
+            PointType ptInW;
+            ptInW.x = t_w_pt.x();
+            ptInW.y = t_w_pt.y();
+            ptInW.z = t_w_pt.z();
+            cloudCurrentScanInWorld_->points.push_back(ptInW);
+        }
+    }
+    else
+    {
+        for (auto point: cloudScanCurrDs_->points)
+        {
+            Eigen::Vector3d t_b_pt(point.x, point.y, point.z);
+            Eigen::Vector3d t_w_pt = q_w_bCurrKf_ * t_b_pt + t_w_bCurrKf_;
+
+            PointType ptInW;
+            ptInW.x = t_w_pt.x();
+            ptInW.y = t_w_pt.y();
+            ptInW.z = t_w_pt.z();
+            cloudCurrentScanInWorld_->points.push_back(ptInW);
+        }
     }
 }
 
@@ -1335,13 +1653,36 @@ void Frontend::updateCloudMap()
     //     pt.z = ptOut.z();
     // }
     // cloudFramesMapGlobal_.push_back(cloud_current_scan_);
+    if(config_.use_voxel_map)
+    {
+        // for debugging
+        if (debug_print_num_point_in_voxel_map)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << " before update: voxelMap.size() = " << voxelMap_.Pointcloud().size());
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << "             added cloud.size() = " << cloudScanCurrInWorld_vecEigen_.size());
+        }
+        voxelMap_.Update(cloudScanCurrInWorld_vecEigen_, t_w_bCurrKf_);
+        // voxelMap_.CheckVoxelIds(); // for debugging 
 
-    pcl::PointCloud<PointType>::Ptr cloud;
-    cloud.reset(new pcl::PointCloud<PointType>());
-    // swap (=move) point cloud for fast computation
-    std::swap(cloudCurrentScanInWorld_, cloud);
+        // for debugging
+        if (debug_print_num_point_in_voxel_map)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__ << " after update: voxelMap.size() = " << voxelMap_.Pointcloud().size());
+        }
+    
+        // for debugging
+        if(debug_dump_log_file_voxel_ids)
+            voxelMap_.DumpVoxelCorrdinates(timeCurrScanBeg_);
+    }
+    else
+    {
+        pcl::PointCloud<PointType>::Ptr cloud;
+        cloud.reset(new pcl::PointCloud<PointType>());
+        // swap (=move) point cloud for fast computation
+        std::swap(cloudCurrentScanInWorld_, cloud);
 
-    cloudFramesMapGlobal_.push_back(cloud);
+        cloudFramesMapGlobal_.push_back(cloud);
+    }
 }
 
 void Frontend::publishOdometry()
@@ -1489,7 +1830,10 @@ void Frontend::clearProcess()
 
     cloudScanCurr_->clear();
     cloudScanCurrDs_->clear();
+    cloudScanCurrDs_vecEigen_.clear();
+    cloudScanCurrDsToMap_vecEigen_.clear();
     cloudCurrentScanInWorld_->clear();
+    cloudScanCurrInWorld_vecEigen_.clear();
 
     timePrevScanEnd_ = timeCurrScanEnd_;
 
@@ -1726,7 +2070,7 @@ void Frontend::performFixedLagSmoothing()
     // Solve the optimization
     bool success = false;
     try {
-        fixedLagSmoother_->update(graphFactors_,graphValues_,keyTimestamps_);     // following gtsam_4-3/examples/FixedLagSmootherExample.cpp
+        fixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);     // following gtsam_4-3/examples/FixedLagSmootherExample.cpp
         success = true;
     } catch (const gtsam::IndeterminantLinearSystemException &) {
         success = false;
@@ -1809,6 +2153,243 @@ void Frontend::performFixedLagSmoothing()
     // doneFirstOpt = true;
     // isFirstSmoothingDone_ = false;
     isFirstSmoothingDone_ = true;
+}
+
+// // pcl::PointCloud ver. of KissICP::Voxelize() (KissICP::Voxelize() uses std::vector<Eigen::Vector3d> as point cloud data)
+// // KissICP::Vector3dVectorTuple KissICP::Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
+// // Frontend::Vector3dVectorTuple Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
+// // Frontend::Vector3dVectorTuple Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
+// pcl::PointCloud<PointType>::Ptr Voxelize(const pcl::PointCloud<PointType>::Ptr cloudIn) const 
+// {
+//     const auto voxel_size = config_.voxel_size;
+
+//     const std::vector<Eigen::Vector3d> frame;
+
+//     // convert points in pcl::PointCloud to std::vector<Eigen::Vector3d>
+//     for (const auto& pt: cloudIn->points)
+//     {
+//         Eigen::Vector3d pt_frame(pt.x, pt.y, pt.z);
+//         frame.emplace_back(Eigen::Vector3d());
+//     }
+
+//     const auto frame_downsample = lo_dev::VoxelDownsample(frame, voxel_size * 0.5);
+//     const auto source = lo_dev::VoxelDownsample(frame_downsample, voxel_size * 1.5);
+//     return {source, frame_downsample};
+// }
+
+
+void Frontend::solveLeastSquaresInequalityConstrained()
+{
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    if(!config_.use_voxel_map)
+    {
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+    }
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
+    // set the initial guess as the current state estimation
+    q_bPrevKf_bCurrKf_lo_ = q_bPrevKf_bCurrKf_initGuess_; 
+    t_bPrevKf_bCurrKf_lo_ = t_bPrevKf_bCurrKf_initGuess_;
+
+    // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    t_w_bCurrKf_ = q_w_bCurrKf_ + t_bPrevKf_bCurrKf_lo_ + t_w_bCurrKf_;
+    q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_lo_).normalized();
+
+    // for the first iteration, we initialize the relative transformation the initialguess
+    // Eigen::Vector3d x = log_map(
+    //     // q_w_bCurrKf_.w(),
+    //     // q_w_bCurrKf_.x(),
+    //     // q_w_bCurrKf_.y(),
+    //     // q_w_bCurrKf_.z(),
+    //     q_bPrevKf_bCurrKf_lo_.w(),
+    //     q_bPrevKf_bCurrKf_lo_.x(),
+    //     q_bPrevKf_bCurrKf_lo_.y(),
+    //     q_bPrevKf_bCurrKf_lo_.z(),
+    // )
+    // Since we have already adjust the current absolute pose to the initiaguess
+    //  , and we will compute the relative transformation wrt the current pose,
+    //  we can treat the current pose as origin (identity) and the initial pose update to be zero (in R^6)
+    x = Eigen::Vector6d::Zero();
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
+        // // define a loss function with some kernel
+        // ceres::LossFunction *lossFunction = new ceres::HuberLoss(0.1); // the Huber kernel is the same as liliom
+
+        // // define rotation parameterization: we parameterize rotation as quarternion by using built-in parameterization in Ceres
+        // // if you use variables that live on manifolds(Lie-Groups) you have to define local parameterizations to tell Ceres how to manipulate those variables
+        // // translation components live on a common vector space so they don't need parameterization, but rotation components do.
+        // ceres::LocalParameterization *quatParameterization = new ceres::QuaternionParameterization();
+
+        // // create a problem object in Ceres
+        // ceres::Problem problem;
+
+        // // add a pointer to the rotation variables to optimize, with the parameterization
+        // problem.AddParameterBlock(icpPoseParam, 4, quatParameterization);
+        // // void Problem::AddParameterBlock(double *values, int size, Manifold *manifold)
+        // //  -> icpPoseParam,4,quatParameterization = pointer to icpPoseParam[0] and 4 succeeding components in the array with manifold parameterization
+        // //                                         = rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
+
+        // // add a pointer to the translation variables to optimize 
+        // problem.AddParameterBlock(icpPoseParam + 4, 3);
+        // // void Problem::AddParameterBlock(double *values, int size)
+        // //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
+        // //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
+
+        // set initial guess x(in R3) based on axis-angle representation
+        // let's treat the current orientation is identity. (= frame origin)
+        //  and convert the initial guess (in S(3)) to axis-angle representation
+        
+        // Eigen::Vector3d x = log_map(
+        //     // q_w_bCurrKf_.w(),
+        //     // q_w_bCurrKf_.x(),
+        //     // q_w_bCurrKf_.y(),
+        //     // q_w_bCurrKf_.z(),
+        //     q_bPrevKf_bCurrKf_lo_.w(),
+        //     q_bPrevKf_bCurrKf_lo_.x(),
+        //     q_bPrevKf_bCurrKf_lo_.y(),
+        //     q_bPrevKf_bCurrKf_lo_.z(),
+        // )
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+        preparePointPlaneResidual();
+        // store point-plane residual computation on 
+            // std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
+            // std::vector<Eigen::Vector3d> planeNormDistForResidual_;
+            // std::vector<double> pointPlaneDistForResidual_;
+        timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // for debugging
+        if (debug_print_num_residuals) 
+        {
+            std::cout << "num. of pts nn found = " << numPtsNnFound_ << std::endl;
+            std::cout << "num. of residual points = " << numResidual_ << std::endl;
+        }
+
+        // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+        for (int i = 0; i < numResidual_; ++i) 
+        {
+            // Construct an inequality constraint optimization problem based on point-plane parameters
+            // 
+            const Eigen::MatrixXd Adouble = A.template cast<double>();
+            const Eigen::MatrixXd bdouble = b.template cast<double>();
+            // construct Hessian(= A.T @ A), A: measurement Jacobian
+            Eigen::MatrixXd HQP{ Adouble.transpose() * Adouble };
+            // construct -A.T @ b, A: Jacobian, b: residual vector
+            Eigen::VectorXd hQP{ -Adouble.transpose() * bdouble };
+
+            Eigen::VectorXd xQP;
+            Eigen::VectorXd lb;
+            Eigen::VectorXd ub;
+            Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd::Zero(numberOfConstraints, 6);
+            Eigen::VectorXd Alb = Eigen::VectorXd::Zero(numberOfConstraints, 1);
+            Eigen::VectorXd Aub = Eigen::VectorXd::Zero(numberOfConstraints, 1);
+        }
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // // set some solver parameters
+        // ceres::Solver::Options solverOptions;
+        // solverOptions.linear_solver_type = ceres::DENSE_QR;
+        // solverOptions.max_num_iterations = config_.max_iterations;
+        // solverOptions.max_solver_time_in_seconds = config_.max_solver_time_in_seconds;
+        // solverOptions.minimizer_progress_to_stdout = false;
+        // solverOptions.check_gradients = false;
+        // solverOptions.gradient_check_relative_precision = 1e-2;
+        // ceres::Solver::Summary summary;
+        // timeLogger_.start("ceres::Solve", __FUNCTION__, __LINE__);
+        // // solve the least squares for this round in ICP
+        // ceres::Solve(solverOptions, &problem, &summary);
+        // timeLogger_.stop("ceres::Solve", __FUNCTION__, __LINE__);
+
+        // set solver parameters and solve
+        qpmad::Solver solverStandard;   // Solver = SolverTemplate<double, Eigen::Dynamic, 1, Eigen::Dynamic>; in qpmad/solver.h
+        qpmad::SolverParameters param;
+        param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
+        qpmad::Solver::ReturnStatus status =
+            solverStandard.solve(xQP, HQP, hQP, Eigen::VectorXd(), Eigen::VectorXd(), constraintMatrix, Alb, Aub, param);
+
+// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // check optimization status
+        if (status != qpmad::Solver::OK)
+        {
+            LOG_WARNING_STREAM("Error in solving inequality constrained optimization problem with QPmad library.");
+        }
+        Eigen::VectorXd dual;
+        Eigen::Matrix<qpmad::MatrixIndex, Eigen::Dynamic, 1> indices;
+        Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
+        int activeInequalityConstraintSize = 0;
+        solverStandard.getInequalityDual(dual, indices, is_lower);
+        std::cout << "Number of active Inquality Constraints: " << dual.size() << std::endl;
+        activeInequalityConstraints = dual.size();
+        std::cout << "Do Constraints satisfied? 0 == satisfied: " << std::endl;
+        std::cout << constraintMatrix*xQP << std::endl;
+
+        // update the state vector
+        const Eigen::VectorXf xQPfloat = xQP.template cast<float>();
+        x.row(0) << xQPfloat(0);
+        x.row(1) << xQPfloat(1);
+        x.row(2) << xQPfloat(2);
+        x.row(3) << xQPfloat(3);
+        x.row(4) << xQPfloat(4);
+        x.row(5) << xQPfloat(5);        
+
+        // // make sure w in rotation quaternion is positive (carried over from liliom)
+        // // this might not be necesary but keep it just in case
+        // if(icpPoseParam[0] < 0) 
+        // {
+        //     Eigen::Quaterniond tmpQ(icpPoseParam[0],
+        //             icpPoseParam[1],
+        //             icpPoseParam[2],
+        //             icpPoseParam[3]);
+        //     tmpQ = unifyQuaternion(tmpQ);
+        //     icpPoseParam[0] = tmpQ.w();
+        //     icpPoseParam[1] = tmpQ.x();
+        //     icpPoseParam[2] = tmpQ.y();
+        //     icpPoseParam[3] = tmpQ.z();
+        // }
+
+        pointScanCurrForResidual_.clear();
+        planeNormDistForResidual_.clear();
+        pointPlaneDistForResidual_.clear();
+
+        // update the pose variables to the latest optimized ones
+        // icpPoseParam[] is what is being optimized in the Ceres process above
+        // we need to update the pose (q_w_bCurrKf_, t_w_bCurrKf_) to re-compute the nearest neighbor points and planes in preparePointPlaneResidual() at each iteration
+        // , so we have to update the pose variables(q_w_bCurrKf_, t_w_bCurrKf_) at each ICP iteration.
+        // q_w_bCurrKf_ = Eigen::Quaterniond(
+        //                     icpPoseParam[0],
+        //                     icpPoseParam[1],
+        //                     icpPoseParam[2],
+        //                     icpPoseParam[3]);
+        // t_w_bCurrKf_ = Eigen::Vector3d(
+        //                     icpPoseParam[4],
+        //                     icpPoseParam[5],
+        //                     icpPoseParam[6]);
+
+        // update the estimated relative pose
+        // q_bPrevKf_bCurrKf_lo_ += expmap_based_on(x.row(0), x.row(2), x.row(2));
+        // t_bPrevKf_bCurrKf_lo_  += update_based_on(x.row(3), x.row(4), x.row(5));
+
+        // update the current estimated absolute pose in world frame
+        // (since it is used for preparePointPlaneResidual())
+        // q_w_bCurrKf_ = q_w_bCurrKf_ * q_bPrevKf_bCurrKf_lo_;
+        // t_w_bCurrKf_ = t_w_bCurrKf_ + t_bPrevKf_bCurrKf_lo_;
+
+        // x = Eigen::Vector3d::Zero() 
+    }
+    // end of the point-to-plane icp with inequality constraints
 }
 
 } // namespace lo_dev

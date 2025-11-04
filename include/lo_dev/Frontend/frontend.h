@@ -39,6 +39,10 @@
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/BatchFixedLagSmoother.h>
 
+#include <tsl/robin_map.h>
+#include "lo_dev/VoxelMap/VoxelHashMap.hpp"
+
+#include <omp.h>
 
 namespace lo_dev 
 {
@@ -51,6 +55,16 @@ struct Config_Frontend
 {
     // ---- for general ---- 
     bool set_main_process_timer; // true: run() is called in timer callback, false: run() is called in pointcloud msg callback
+
+    // ---- for voxel map ----
+    bool use_voxel_map;
+    double voxel_size;
+    double voxel_max_distance;
+    unsigned int max_points_per_voxel;
+    bool turn_on_voxel_downsample;
+    double voxel_downsample_resolution_raw_to_mapping;
+    double voxel_downsample_resolution_mapping_to_icpsource;
+    double threshold_voxel_nn_search_radius;
 
     // ---- for preprocessing ---- 
     int num_scans;
@@ -145,6 +159,9 @@ private:
     pcl::PointCloud<PointType>::Ptr cloudKfWindow_;
     TimeLogger timeLogger_;
 
+    // ---- for voxel map ---- 
+    VoxelHashMap voxelMap_;
+
     // pose(transformation) variables
     Eigen::Quaterniond q_w_bPrevKf_;    // imu pose(rotation) w.r.t. world at the previous keyframe(previous scan)
     Eigen::Vector3d t_w_bPrevKf_;       // imu pose(translation) w.r.t. world at the previous keyframe(previous scan)
@@ -161,6 +178,7 @@ private:
     // t_X_Y: translation of X with respect to Y frame
     // e.g.) q_w_bPrevKf_: translation of imu pose at previous keyframe(scan)(=bPrevKf) with respect to the world frame(=w)
     
+
     // for ROS2 message handling
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdom_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCloud_;
@@ -196,13 +214,20 @@ private:
     pcl::KdTreeFLANN<PointType>::Ptr kdTreeMapLocal_; // kd tree for nn search to search map point cloud
     pcl::PointCloud<PointType>::Ptr cloudScanCurr_; // current scan point cloud downsampled
     pcl::PointCloud<PointType>::Ptr cloudScanCurrDs_; // current scan point cloud downsampled
+    std::vector<Eigen::Vector3d> cloudScanCurrDs_vecEigen_; // to use kiss icp Voxel map
+    std::vector<Eigen::Vector3d> cloudScanCurrDsToMap_vecEigen_;
     pcl::PointCloud<PointType>::Ptr cloudCurrentScanInWorld_;
+    std::vector<Eigen::Vector3d> cloudScanCurrInWorld_vecEigen_; // to use kiss icp Voxel map
     pcl::VoxelGrid<PointType> downsizeFilterScanCurr_; // downsampling filter for current scan
     pcl::VoxelGrid<PointType> downsizeFilterMapLocal_; // downsampling filter for map point cloud
     std::vector<pcl::PointCloud<PointType>::Ptr> cloudFramesMapGlobal_; // surf_frames in LidarOdometry.cpp in Liliom
-    int numResidual_;
-    pcl::PointCloud<PointType>::Ptr pointScanCurrForResidual_;
-    pcl::PointCloud<PointType>::Ptr planeNormDistForResidual_;
+    int numResidual_ = 0;
+    int numPtsNnFound_ = 0;
+    // pcl::PointCloud<PointType>::Ptr pointScanCurrForResidual_;
+    // pcl::PointCloud<PointType>::Ptr planeNormDistForResidual_;
+    std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
+    std::vector<Eigen::Vector3d> planeNormDistForResidual_;
+    std::vector<double> pointPlaneDistForResidual_;
     // int scan_match_cnt_ = 10; // num. of Icp iteration, which needed to be in config param
 
 

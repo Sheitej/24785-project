@@ -58,6 +58,9 @@ bool debug_print_estimated_state_fg;
 bool debug_print_published_pose;
 bool debug_print_key_timestamp_in_window;
 bool debug_print_num_factors_values;
+bool debug_print_num_downsampled_point;
+bool debug_print_num_point_in_voxel_map;
+bool debug_dump_log_file_voxel_ids;
 
 
 // for initialization parameter
@@ -202,6 +205,9 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.print_published_pose", false);
     node->declare_parameter<bool>("debug.print_key_timestamp_in_window", false);
     node->declare_parameter<bool>("debug.print_num_factors_values", false);
+    node->declare_parameter<bool>("debug.print_num_downsampled_point", false);
+    node->declare_parameter<bool>("debug.debug_print_num_point_in_voxel_map", false);
+    node->declare_parameter<bool>("debug.debug_dump_log_file_voxel_ids", false);
 
     debug_print_imu_forward_propagation_state = node->get_parameter("debug.print_imu_forward_propagation_state").as_bool();
     debug_print_get_imu_pose_at_measurement_time = node->get_parameter("debug.print_get_imu_pose_at_measurement_time").as_bool();
@@ -225,6 +231,9 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_published_pose = node->get_parameter("debug.print_published_pose").as_bool();
     debug_print_key_timestamp_in_window = node->get_parameter("debug.print_key_timestamp_in_window").as_bool();
     debug_print_num_factors_values = node->get_parameter("debug.print_num_factors_values").as_bool();
+    debug_print_num_downsampled_point = node->get_parameter("debug.print_num_downsampled_point").as_bool();
+    debug_print_num_point_in_voxel_map = node->get_parameter("debug.debug_print_num_point_in_voxel_map").as_bool();
+    debug_dump_log_file_voxel_ids = node->get_parameter("debug.debug_dump_log_file_voxel_ids").as_bool();
 
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_forward_propagation_state " << debug_print_imu_forward_propagation_state);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_get_imu_pose_at_measurement_time " << debug_print_get_imu_pose_at_measurement_time);
@@ -248,6 +257,9 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_published_pose" << debug_print_published_pose);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_key_timestamp_in_window" << debug_print_key_timestamp_in_window);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_factors_values" << debug_print_num_factors_values);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_downsampled_point" << debug_print_num_downsampled_point);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_point_in_voxel_map" << debug_print_num_point_in_voxel_map);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.dump_log_file_voxel_ids" << debug_dump_log_file_voxel_ids);
 
 
     // ---------- for initialization parameter ---------- 

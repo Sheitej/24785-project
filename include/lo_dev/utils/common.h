@@ -34,6 +34,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Core>
 
+#include <tsl/robin_map.h>
+
 
 struct VelodynePointXYZIRT
 {

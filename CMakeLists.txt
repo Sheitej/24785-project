@@ -49,8 +49,11 @@ find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(GTSAM REQUIRED QUIET)
-find_package(TBB REQUIRED)
+find_package(TBB REQUIRED)  # not used but keep
+find_package(tsl-robin-map REQUIRED)
 # find_package(livox_ros_driver2 REQUIRED)
+
+find_package(OpenMP REQUIRED)
 
 # Include directories
 include_directories(
@@ -62,6 +65,7 @@ include_directories(
   ${TBB_INCLUDE_DIR}
   ${Sophus_INCLUDE_DIRS}
   ${pcl_conversions_INCLUDE_DIRS}
+  ${tsl-robin-map_INCLUDE_DIRS}
   # ${livox_ros_driver2_INCLUDE_DIRS}
 )
 
@@ -71,14 +75,18 @@ link_directories(
   ${PCL_LIBRARY_DIRS}
   ${OpenCV_LIBRARY_DIRS}
   ${GTSAM_LIBRARY_DIRS}
+  ${tsl-robin-map_LIBRARY_DIRS}
 )
 
 set(GTSAM_LIBRARIES gtsam)
+# set(tsl-robin-map_LIBRARIES tsl-robin-map)
 
 # Define Library
 add_library(LoDevLib SHARED
   src/Frontend/frontend.cpp
   src/parameter/parameter.cpp
+  src/VoxelMap/VoxelHashMap.cpp
+  src/VoxelMap/VoxelUtils.cpp
 )
 
 # Set up library include directory
@@ -109,14 +117,18 @@ target_link_libraries(LoDevLib
   ${OpenCV_LIBRARIES}
   gtsam
   ${CERES_LIBRARIES}
+  ${tsl-robin-map_LIBRARIES}
+  OpenMP::OpenMP_CXX
 )
 
 # Frontend node
 add_executable(frontend_node src/frontend_node.cpp)
 ament_target_dependencies(frontend_node rclcpp nav_msgs sensor_msgs tf2_ros tf2_eigen pcl_conversions pcl_msgs PCL)
 target_link_libraries(frontend_node
-    gtsam
-    LoDevLib
+  gtsam
+  LoDevLib
+#  ${tsl-robin-map_LIBRARIES}
+#  OenMP::OpenMP_CXX
 )
 
 # Install Exported Libraries

@@ -102,6 +102,9 @@ extern bool debug_print_estimated_state_fg;
 extern bool debug_print_published_pose;
 extern bool debug_print_key_timestamp_in_window;
 extern bool debug_print_num_factors_values;
+extern bool debug_print_num_downsampled_point;
+extern bool debug_print_num_point_in_voxel_map;
+extern bool debug_dump_log_file_voxel_ids;
 
 
 // for initialization parameter
