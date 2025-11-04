@@ -65,7 +65,7 @@
         build_local_map_from_all_global_map: false
         
         # ---- for factor graph ----
-        turn_on_factor_graph: true 
+        turn_on_factor_graph: false 
         lidar_correction_noise: 0.01
         acc_n: 3.9939570888238808e-03          # accelerometer measurement noise standard deviation. #0.2
         gyr_n: 1.5636343949698187e-03         # gyroscope measurement noise standard deviation.     #0.05
