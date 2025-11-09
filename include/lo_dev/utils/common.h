@@ -111,6 +111,15 @@ inline void getGtsamFromEigen(const Eigen::Quaterniond& qIn, const Eigen::Vector
     poseOut = gtsam::Pose3(rotIn, ptIn);
 }
 
+
+// inline void getGtsamFromEigen(const Eigen::Quaterniond& qIn, const Eigen::Vector3d& tIn, gtsam::Pose3& poseOut)
+// {
+//     const gtsam::Rot3 rotIn = gtsam::Rot3::Quaternion(qIn.w(), qIn.x(), qIn.y(), qIn.z());
+//     const gtsam::Point3 ptIn = gtsam::Point3(tIn);
+
+//     poseOut = gtsam::Pose3(rotIn, ptIn);
+// }
+
 // from math_tool.h in liliom
 template <typename T>
 Eigen::Quaternion<T> unifyQuaternion(const Eigen::Quaternion<T> &q)
@@ -121,6 +130,50 @@ Eigen::Quaternion<T> unifyQuaternion(const Eigen::Quaternion<T> &q)
         return resultQ;
     }
 }
+
+// template <typename T>
+// Eigen::Matrix<T, 3, 3> skewSymmetricMatrix(const Eigen::Vector<T> &q)??
+Eigen::Matrix3d getSkewSymMatrix(const Eigen::Vector3d x)
+{
+    Eigen::Matrix3d x_hat;
+    x_hat <<     0, -x(2),  x(1),
+              x(2),     0, -x(0),
+             -x(1),  x(0),     0;
+
+    return x_hat;
+}
+
+
+// median in-place: v will be permuted
+double getMedianInPlace(Eigen::Ref<Eigen::VectorXd> v) {
+    const std::size_t n = static_cast<std::size_t>(v.size());
+    if (n == 0) return std::numeric_limits<double>::quiet_NaN();
+    double* first = v.data();
+    double* last  = v.data() + n;
+    const std::size_t mid = n / 2;
+
+    std::nth_element(first, first + mid, last);
+    double hi = first[mid];
+    if (n & 1) return hi;  // odd
+
+    // lower median = max of [first, first+mid)
+    double lo = *std::max_element(first, first + mid);
+    return 0.5 * (lo + hi);
+}
+
+// // exponential map operation based on right multiplicative one (not implemented in Sophus)
+// Sophus::SE3<Sophus::Scalar> exp_right(Sophus::Tangent const& a) 
+// {
+//     using std::cos;
+//     using std::sin;
+//     Sophus::Vector3<Sophus::Scalar> const omega = a.template tail<3>();
+
+//     Sophus::Scalar theta;
+//     Sophus::SO3<Sophus::Scalar> const so3 = Sophus::SO3<Scalar>::expAndTheta(omega, &theta);
+//     Sophus::Matrix3<Scalar> const V = Sophus::SO3<Scalar>::leftJacobian(omega, theta);
+//     return SE3<Scalar>(so3, V * a.template head<3>());
+// }
+
 
 class TimeLogger 
 {
@@ -291,6 +344,7 @@ public:
             iter.second.time_mean_in_ms_ = std::accumulate(iter.second.time_usage_in_ms_.begin(), iter.second.time_usage_in_ms_.end(), 0.0) / double(iter.second.time_usage_in_ms_.size());
         }
     }
+    
 
 private:
     rclcpp::Logger logger_;

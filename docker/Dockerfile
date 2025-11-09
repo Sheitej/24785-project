@@ -98,6 +98,12 @@ RUN git clone https://github.com/Tessil/robin-map.git \
     && mkdir build && cd build && cmake .. -DBUILD_TESTS=OFF \
     && make -j8 && sudo make install
 
+WORKDIR /sandbox
+RUN git clone https://github.com/leggedrobotics/qpmad.git \
+    && cd qpmad && git checkout 53edb8a \
+    && mkdir build && cd build && cmake .. -DBUILD_TESTS=OFF \
+    && make -j8 && sudo make install
+
 # RUN pip install rerun-sdk
 # RUN pip install numpy==1.24.3 matplotlib==3.7.1
 # RUN pip install --upgrade packaging

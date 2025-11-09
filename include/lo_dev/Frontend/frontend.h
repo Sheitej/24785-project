@@ -44,6 +44,9 @@
 
 #include <omp.h>
 
+// qpmad InEqualityConstrained Opt. Module
+#include <qpmad/solver.h>
+
 namespace lo_dev 
 {
 
@@ -98,10 +101,26 @@ struct Config_Frontend
     // bool  use_imu_roll_pitch;
     double lag; 
     bool use_lo_prior_factor_wo_between_factor; 
+
+    // ---- for inequality constraints ---- 
+    bool turn_on_qp_ineq_constraints_active_set;
+    int sqp_iteration_num_qp_active_set;
+    bool turn_on_levenberg_marquardt_qp_active_set;
+    double levenberg_marquardt_lambda_qp_active_set;
+    bool turn_on_levenberg_marquardt_qp_active_set_marquardt_damping;
+    bool turn_on_robust_kernel_qp_active_set;
+    bool turn_on_mad_based_scaling_for_kernel_weights_qp_active_set;
+    std::string robust_kernel_qp_active_set;
+    bool turn_on_jacobian_column_scaling_qp_active_set;
+    std::string pose_increment_multiplication;
+    bool turn_on_Sophus_SE3_update;
+    std::string qp_active_set_Hessian_computation;
 };
+
 
 class Frontend : public rclcpp::Node 
 {
+    // enum class Kernel { Huber, Cauchy, Tukey };
 public:
     Frontend(const rclcpp::NodeOptions& options);
     bool readParameters();
@@ -137,6 +156,9 @@ public:
     void updateCloudMap();
     void transformPointCloudInWorldFrame();
 
+    // ---- for lidar odometry (inequality constraints) ----
+    void solveLeastSquares_InequalityConstraints_ActiveSet();
+    void computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation);
 
     // factor graph is commented out now (currently not implemented and might or might not be used in the future)
     // // ---- for factor graph ---- 
@@ -225,9 +247,13 @@ private:
     int numPtsNnFound_ = 0;
     // pcl::PointCloud<PointType>::Ptr pointScanCurrForResidual_;
     // pcl::PointCloud<PointType>::Ptr planeNormDistForResidual_;
-    std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
-    std::vector<Eigen::Vector3d> planeNormDistForResidual_;
-    std::vector<double> pointPlaneDistForResidual_;
+    // std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
+    std::vector<Eigen::Vector3d> pointScanCurrInBForResidual_;
+    std::vector<Eigen::Vector3d> pointScanCurrInWForResidual_;
+    // std::vector<Eigen::Vector3d> planeNormDistForResidual_;
+    std::vector<Eigen::Vector3d> planeNormalForResidual_;
+    // std::vector<double> pointPlaneDistForResidual_;
+    std::vector<double> planeDistFromOriginForResidual_;
     // int scan_match_cnt_ = 10; // num. of Icp iteration, which needed to be in config param
 
 
@@ -255,6 +281,10 @@ private:
     gtsam::Vector3 velCurrKf_;
     gtsam::imuBias::ConstantBias biasCurrKf_;
     gtsam::NavState stateCurrKf_;
+
+    // ---- for qp inequality constraints ---- 
+    bool velocity_ready_ = false; // for the first iteration, run unconsrained least squares(solveLeastSquares()) to set timeScanBeg and timeScanCurr for velocity computation for ineq. constraints.
+
 };
 
 } // namespace lo_dev

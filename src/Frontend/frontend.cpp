@@ -1,33 +1,9 @@
 #include <lo_dev/Frontend/frontend.h>
+#include <sophus/se3.hpp>
+#include <sophus/so3.hpp>
 
 namespace lo_dev 
 {    
-
-// [TODO]: 
-// Now that kiss-icp voxel map got to work (but still bad) to some extent
-// We need to improve the performance of the voxel map
-//  - GetClosestNNeighbors() is still slow -> should we use kdTree inside instead of std::nth_element
-//  - We can use multi-threads for point-plane distance calculation
-//  - We can look into other open-source code to see how to perform nn 5 pts search
-//  - Another thing is that voxel map is slow and odometry fails as well
-//      -> Is there any reason that makes ICP fail? 
-//      -> Since the only the difference is the NN search it should not be the difference on icp performance
-//      -> but voxel-based nn search is not exact nn search (actually yes it IS the exact search)
-
-// [NOTE]
-// - SolveLeastSquares() takes time a lot
-//      - preparingPointPlaneResidual actually takes time (more than half)
-//      - also num_icp_iteration directly affects the time and performance
-//          - if num_icp_iteration=10, large time, good performance
-//          - if num_icp_iteration=5,  real-time, poor performance
-
-// Fast-LIO ikd-Tree is really fast (NN-search would be very fast. Why?)
-
-// timeLogger_ does not work for voxel map for some reason 
-
-// Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options), timeLogger_(this->get_logger())
-// {
-// }
 
 Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options)
 {   
@@ -168,6 +144,46 @@ bool Frontend::readParameters()
     RCLCPP_INFO_STREAM(this->get_logger(), "lag: " << config_.lag);
     RCLCPP_INFO_STREAM(this->get_logger(), "use_lo_prior_factor_wo_between_factor: " << config_.use_lo_prior_factor_wo_between_factor);
 
+    // ---- parameters for inequality constraints ---- 
+    this->declare_parameter<bool>("frontend_node.turn_on_qp_ineq_constraints_active_set",false);
+    this->declare_parameter<int>("frontend_node.sqp_iteration_num_qp_active_set", 10);
+    this->declare_parameter<bool>("frontend_node.turn_on_levenberg_marquardt_qp_active_set", false);
+    this->declare_parameter<double>("frontend_node.levenberg_marquardt_lambda_qp_active_set", 2.0);
+    this->declare_parameter<bool>("frontend_node.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping", true);
+    this->declare_parameter<bool>("frontend_node.turn_on_robust_kernel_qp_active_set", true);
+    this->declare_parameter<bool>("frontend_node.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set", true);
+    this->declare_parameter<std::string>("frontend_node.robust_kernel_qp_active_set", "");
+    this->declare_parameter<bool>("frontend_node.turn_on_jacobian_column_scaling_qp_active_set", "");
+    this->declare_parameter<std::string>("frontend_node.pose_increment_multiplication", "left");
+    this->declare_parameter<bool>("frontend_node.turn_on_Sophus_SE3_update", true);
+    this->declare_parameter<std::string>("frontend_node.qp_active_set_Hessian_computation", "for_loop");
+
+    config_.turn_on_qp_ineq_constraints_active_set = this->get_parameter("frontend_node.turn_on_qp_ineq_constraints_active_set").as_bool();
+    config_.sqp_iteration_num_qp_active_set = this->get_parameter("frontend_node.sqp_iteration_num_qp_active_set").as_int();
+    config_.turn_on_levenberg_marquardt_qp_active_set = this->get_parameter("frontend_node.turn_on_levenberg_marquardt_qp_active_set").as_bool();
+    config_.levenberg_marquardt_lambda_qp_active_set = this->get_parameter("frontend_node.levenberg_marquardt_lambda_qp_active_set").as_double();
+    config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping = this->get_parameter("frontend_node.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping").as_bool();
+    config_.turn_on_robust_kernel_qp_active_set = this->get_parameter("frontend_node.turn_on_robust_kernel_qp_active_set").as_bool();
+    config_.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set = this->get_parameter("frontend_node.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set").as_bool();
+    config_.robust_kernel_qp_active_set = this->get_parameter("frontend_node.robust_kernel_qp_active_set").as_string();
+    config_.turn_on_jacobian_column_scaling_qp_active_set = this->get_parameter("frontend_node.turn_on_jacobian_column_scaling_qp_active_set").as_bool();
+    config_.pose_increment_multiplication = this->get_parameter("frontend_node.pose_increment_multiplication").as_string();
+    config_.turn_on_Sophus_SE3_update = this->get_parameter("frontend_node.turn_on_Sophus_SE3_update").as_bool();
+    config_.qp_active_set_Hessian_computation = this->get_parameter("frontend_node.qp_active_set_Hessian_computation").as_string();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_qp_ineq_constraints_active_set: " << config_.turn_on_qp_ineq_constraints_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "sqp_iteration_num: " << config_.sqp_iteration_num_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_levenberg_marquardt: " << config_.turn_on_levenberg_marquardt_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_lambda: " << config_.levenberg_marquardt_lambda_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_levenberg_marquardt_qp_active_set_marquardt_damping: " << config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_robust_kernel_qp_active_set: " << config_.turn_on_robust_kernel_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_mad_based_scaling_for_kernel_weights_qp_active_set: " << config_.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "robust_kernel_qp_active_set: " << config_.robust_kernel_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_jacobian_column_scaling_qp_active_set: " << config_.turn_on_jacobian_column_scaling_qp_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "pose_increment_multiplication: " << config_.pose_increment_multiplication);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_Sophus_SE3_update: " << config_.turn_on_Sophus_SE3_update);
+    RCLCPP_INFO_STREAM(this->get_logger(), "qp_active_set_Hessian_computation: " << config_.qp_active_set_Hessian_computation);
+
     return true;
 }
 
@@ -288,7 +304,7 @@ void Frontend::initializeInterface()
     cloudScanCurrDs_.reset(new pcl::PointCloud<PointType>());
     cloudCurrentScanInWorld_.reset(new pcl::PointCloud<PointType>());
     // pointScanCurrForResidual_.reset(new pcl::PointCloud<PointType>());
-    // planeNormDistForResidual_.reset(new pcl::PointCloud<PointType>());
+    // planeNormalForResidual_.reset(new pcl::PointCloud<PointType>());
     const double size = config_.voxel_filter_size;
     downsizeFilterScanCurr_.setLeafSize(size, size, size);
     downsizeFilterMapLocal_.setLeafSize(size, size, size); //config_.voxel_filter_size
@@ -992,8 +1008,6 @@ void Frontend::downsampleCloud()
 
 void Frontend::solveLeastSquares()
 {
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
     if(!config_.use_voxel_map)
     {
         // set the local map point cloud to the kd_tree to nearest neighbor search
@@ -1002,14 +1016,12 @@ void Frontend::solveLeastSquares()
         timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
     }
 
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
     // create pose parameters variables to optimize in Ceres solver    
     // pose representation: [quaternion: w, x, y, z | transition: x, y, z]
     // this parameters are iteratively optimized in Ceres
     // we have to give pointers of the pose parameters to Ceres
     // note that these parameters must represent an absolute pose (T_w_b: transformation of the robot w.r.t. the world) due to the design of Ceres solver
-    // ,although the solver iteratively optimizes the update increment(delta_T) at each iteration (so absolute pose should not matter theoretically)
+    //  because the jacobian is left-jacobian so the pose increment should bd wrt world frame = absolute pose
     double icpPoseParam[7] = 
     {
         q_w_bCurrKf_.w(),
@@ -1020,8 +1032,6 @@ void Frontend::solveLeastSquares()
         t_w_bCurrKf_.y(),
         t_w_bCurrKf_.z()
     };
-
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // ICP iteration (point-to-plane)
     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
@@ -1049,19 +1059,15 @@ void Frontend::solveLeastSquares()
         //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
         //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
 
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
         // compute necessary values for point-to-plane residual computation
         // this is a praparation for the objective function in the least squares, later added to the problem by AddResidualBlock()
         preparePointPlaneResidual();
-        // the following quantities are stored in pointScanCurrForResidual_ and planeNormDistForResidual_:
-        // x:point position -> surf_current_pts
-        // n:plane normal(weighted) -> normal.xyz in surf_normal
-        // d:the distance from the world origin to the plane -> normal.intensity in surf_normal
+        // compute:
+        // x:point position in world
+        // n:plane normal in world
+        // d:the distance from the world origin to the plane -> plane offset (scaler)
         timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
-
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
         // for debugging
         if (debug_print_num_residuals) 
@@ -1074,21 +1080,17 @@ void Frontend::solveLeastSquares()
         for (int i = 0; i < numResidual_; ++i) 
         {
             // set x:the point position
-            // Eigen::Vector3d currentPt(pointScanCurrForResidual_->points[i].x,
-            //                             pointScanCurrForResidual_->points[i].y,
-            //                             pointScanCurrForResidual_->points[i].z);
-            Eigen::Vector3d currentPt = pointScanCurrForResidual_[i]; // Eigen::Vector3d ver.
+            Eigen::Vector3d currentPt = pointScanCurrInBForResidual_[i]; // Eigen::Vector3d ver.
             // here currentPt is a measured point in the body frame and the transformation from body to world is done in LidarPlaneNormIncreFactor
             // note that we have to give the point position in BODY to allow Ceres to examine the loss change w.r.t. the transformation increment in LidarPlaneNormIncreFactor
+            // We always give point coordinate in Body to the optimization solver since point B->W transformation is done based on the transformation at the current iteration in non-linear optimization for solving the current icp iteration
+            //      inner loop: non-linear optimization -> update Jacobian, residual, pose increment at each iteration
+            //      outer loop: icp iteration -> update NN points, plane normal, plane offset
             
             // set n:the normal
-            // Eigen::Vector3d norm(planeNormDistForResidual_->points[i].x,
-            //                         planeNormDistForResidual_->points[i].y,
-            //                         planeNormDistForResidual_->points[i].z);
-            Eigen::Vector3d norm = planeNormDistForResidual_[i];
+            Eigen::Vector3d norm = planeNormalForResidual_[i];
             // set d:distance from the world origin to the plane(=norm inverse)
-            // double normInverse = planeNormDistForResidual_->points[i].intensity; // this is the weighted distance from the origin to the plane
-            double normInverse = pointPlaneDistForResidual_[i]; // Eigen::Vector3d ver.
+            double normInverse = planeDistFromOriginForResidual_[i]; // Eigen::Vector3d ver.
             // set cost function (residual) based on x,n,d
             // point-to-plane residual (=nx+d) will be computed in the cost function (LidarPlaneNormIncreFactor)
             // one point corresponds to one residual(cost function) 
@@ -1100,8 +1102,6 @@ void Frontend::solveLeastSquares()
             // ResidualBlockId Problem::AddResidualBlock(CostFunction *cost_function, LossFunction *loss_function, const std::vector<double*> parameter_blocks)
         }
 
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
         // set some solver parameters
         ceres::Solver::Options solverOptions;
         solverOptions.linear_solver_type = ceres::DENSE_QR;
@@ -1111,17 +1111,13 @@ void Frontend::solveLeastSquares()
         solverOptions.check_gradients = false;
         solverOptions.gradient_check_relative_precision = 1e-2;
 
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
         // create a solution container
         ceres::Solver::Summary summary;
 
         timeLogger_.start("ceres::Solve", __FUNCTION__, __LINE__);
-        // solve the least squares for this round in ICP
+        // solve the least squares for the current iteration in ICP
         ceres::Solve(solverOptions, &problem, &summary);
         timeLogger_.stop("ceres::Solve", __FUNCTION__, __LINE__);
-
-// RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
         // make sure w in rotation quaternion is positive (carried over from liliom)
         // this might not be necesary but keep it just in case
@@ -1138,9 +1134,9 @@ void Frontend::solveLeastSquares()
             icpPoseParam[3] = tmpQ.z();
         }
 
-        pointScanCurrForResidual_.clear();
-        planeNormDistForResidual_.clear();
-        pointPlaneDistForResidual_.clear();
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
 
         // update the pose variables to the latest optimized ones
         // icpPoseParam[] is what is being optimized in the Ceres process above
@@ -1159,15 +1155,15 @@ void Frontend::solveLeastSquares()
     // end of the point-to-plane icp
 }
 
-void Frontend::preparePointPlaneResidual()  // This process can be a parallel process???
+void Frontend::preparePointPlaneResidual()
 {
     numPtsNnFound_ = 0;
     numResidual_ = 0; 
 
     const size_t num_pts_curr = cloudScanCurrDs_->points.size();
-    pointScanCurrForResidual_.resize(num_pts_curr);
-    planeNormDistForResidual_.resize(num_pts_curr);
-    pointPlaneDistForResidual_.resize(num_pts_curr);
+    pointScanCurrInBForResidual_.resize(num_pts_curr);
+    planeNormalForResidual_.resize(num_pts_curr);
+    planeDistFromOriginForResidual_.resize(num_pts_curr);
     std::vector<bool> valid(num_pts_curr, false);
 
 // #pragma omp parallel for num_threads(8) schedule(static)
@@ -1250,9 +1246,9 @@ void Frontend::preparePointPlaneResidual()  // This process can be a parallel pr
 
             // solve linear system to extract a plane normal vector (this is also a least squares)
             // get the norm of the plane using linear solver based on QR composition
-            Eigen::Vector3d norm = matA0.colPivHouseholderQr().solve(matB0);
+            Eigen::Vector3d norm = matA0.colPivHouseholderQr().solve(matB0); //  = v: v = d . n
             double normInverse = 1 / norm.norm(); // = d:distance from the plane to the origin
-            norm.normalize(); // get the unit norm
+            norm.normalize(); // get the unit norm // = n
 
             // Compute the centroid of the plane
             center.x = matA0.col(0).sum() / 5.0;
@@ -1286,23 +1282,18 @@ void Frontend::preparePointPlaneResidual()  // This process can be a parallel pr
                 float weight = 1 - 0.9 * fabs(pd) / sqrt(sqrt(point_curr_scan_inw.x * point_curr_scan_inw.x + point_curr_scan_inw.y * point_curr_scan_inw.y + point_curr_scan_inw.z * point_curr_scan_inw.z));
 
                 // if the weight exceeds the threshold, store the points and normal into the residual container
-                // This is just for computing weighted normal, plane-origin distance, which is used for residual computation in LidarPlaneNormIncreFactor cost function
+                // This is just for computing weighted normal, plane-origin distance, which is used for residual computation in LidarPlaneNormIncreFactor cost function or QP function
                 //  in the cost function, the measured points are transfromed to the world coordinate, so points should be in the body coordinate here.
-                // we adopt a weight calculation of either fast-lio or lili-om way
+                // we adopt a weight calculation of either fast-lio or lili-om way (weight as threshold for residual, not weight for least squares robust kernel)
                 if(config_.use_fastlio_point_plane_residual_param)
                 {
                     if(weight > 0.9) // fast-lio 
                     {
-                        PointType normal;
-                        normal.x = norm.x();
-                        normal.y = norm.y();
-                        normal.z = norm.z();
-                        normal.intensity = normInverse;
-                        Eigen::Vector3d point_eig(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
-                        Eigen::Vector3d normal_eig(norm.x(), norm.y(), norm.z());
-                        pointScanCurrForResidual_[i] = point_eig;
-                        planeNormDistForResidual_[i] = normal_eig;
-                        pointPlaneDistForResidual_[i] = normInverse;
+                        Eigen::Vector3d point_inb(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
+                        Eigen::Vector3d normal(norm.x(), norm.y(), norm.z());
+                        pointScanCurrInBForResidual_[i] = point_inb;
+                        planeNormalForResidual_[i] = normal;
+                        planeDistFromOriginForResidual_[i] = normInverse;
                         valid[i] = true;
 
                         // for debugging
@@ -1310,20 +1301,14 @@ void Frontend::preparePointPlaneResidual()  // This process can be a parallel pr
                             RCLCPP_INFO_STREAM(get_logger(), "direct point-to-plane distance (pd): " << pd);
                     }
                 }
-                else 
+                else // This part would no longer be necessary
                 {
                     if(weight > 0.4) // lili-om 
                     {
-                        PointType normal;
-                        normal.x = weight * norm.x();
-                        normal.y = weight * norm.y();
-                        normal.z = weight * norm.z();
-                        normal.intensity = weight * normInverse;
-                        Eigen::Vector3d point_eig(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
-                        Eigen::Vector3d normal_eig(norm.x(), norm.y(), norm.z());
-                        pointScanCurrForResidual_[i] = point_eig;
-                        planeNormDistForResidual_[i] = normal_eig;
-                        pointPlaneDistForResidual_[i] = normInverse;
+                        Eigen::Vector3d point_inb(point_curr_scan_inb.x, point_curr_scan_inb.y, point_curr_scan_inb.z);
+                        Eigen::Vector3d normal(norm.x(), norm.y(), norm.z());
+                        pointScanCurrInBForResidual_[i] = point_inb;
+                        planeDistFromOriginForResidual_[i] = normInverse;
                         valid[i] = true;
 
                         // for debugging
@@ -1342,25 +1327,25 @@ void Frontend::preparePointPlaneResidual()  // This process can be a parallel pr
     }
 
     // fit the size of the vector to that only for non-zero values
-    std::vector<Eigen::Vector3d> pts_compact;
+    std::vector<Eigen::Vector3d> pts_inb_compact;
     std::vector<Eigen::Vector3d> normals_compact;
     std::vector<double> dists_compact;
-    pts_compact.reserve(num_pts_curr);
+    pts_inb_compact.reserve(num_pts_curr);
     normals_compact.reserve(num_pts_curr);
     dists_compact.reserve(num_pts_curr);
     for (std::size_t i = 0; i < num_pts_curr; ++i) 
     {
         if (valid[i]) 
         { 
-            pts_compact.push_back(pointScanCurrForResidual_[i]);
-            normals_compact.push_back(planeNormDistForResidual_[i]); 
-            dists_compact.push_back(pointPlaneDistForResidual_[i]); 
+            pts_inb_compact.push_back(pointScanCurrInBForResidual_[i]);
+            normals_compact.push_back(planeNormalForResidual_[i]); 
+            dists_compact.push_back(planeDistFromOriginForResidual_[i]); 
         }
     }
-    pointScanCurrForResidual_.swap(pts_compact);
-    planeNormDistForResidual_.swap(normals_compact);
-    pointPlaneDistForResidual_.swap(dists_compact);
-    numResidual_ = static_cast<int>(planeNormDistForResidual_.size());
+    pointScanCurrInBForResidual_.swap(pts_inb_compact);
+    planeNormalForResidual_.swap(normals_compact);
+    planeDistFromOriginForResidual_.swap(dists_compact);
+    numResidual_ = static_cast<int>(planeNormalForResidual_.size());
 }
 
 void Frontend::updatePoseLO()
@@ -1486,9 +1471,22 @@ void Frontend::run()
 
 // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
-    timeLogger_.start("solveLeastSquares", __FUNCTION__, __LINE__);
-    solveLeastSquares();
-    timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
+    if(config_.turn_on_qp_ineq_constraints_active_set && velocity_ready_)
+    {
+        timeLogger_.start("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
+        solveLeastSquares_InequalityConstraints_ActiveSet();
+        timeLogger_.stop("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
+    }
+    else
+    {
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        timeLogger_.start("solveLeastSquares", __FUNCTION__, __LINE__);
+        solveLeastSquares();    // unconstrained least squares
+        timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
+        
+        velocity_ready_ = true;
+    }
     
 // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
@@ -1508,16 +1506,6 @@ void Frontend::run()
             initializeFG();
             isFGInitialized_ = true;
             timeLogger_.stop("initializeFG", __FUNCTION__, __LINE__);
-
-            // transformPointCloudInWorldFrame();
-            // publishOdometry();
-            // publishCloud();
-            // publishTf();
-            // updateCloudMap();
-            // clearProcess();
-
-            // isProcessing_.store(false);
-            // return;
         }
         // else
         // {    
@@ -1601,7 +1589,7 @@ void Frontend::transformPointCloudInWorldFrame()
 
     if(debug_print_published_pose)
     {
-        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);\
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
         RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
         RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_.coeffs().transpose());
     }
@@ -2155,241 +2143,509 @@ void Frontend::performFixedLagSmoothing()
     isFirstSmoothingDone_ = true;
 }
 
-// // pcl::PointCloud ver. of KissICP::Voxelize() (KissICP::Voxelize() uses std::vector<Eigen::Vector3d> as point cloud data)
-// // KissICP::Vector3dVectorTuple KissICP::Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
-// // Frontend::Vector3dVectorTuple Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
-// // Frontend::Vector3dVectorTuple Voxelize(const std::vector<Eigen::Vector3d> &frame) const 
-// pcl::PointCloud<PointType>::Ptr Voxelize(const pcl::PointCloud<PointType>::Ptr cloudIn) const 
-// {
-//     const auto voxel_size = config_.voxel_size;
+void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
+{
+    if(!config_.use_voxel_map)
+    {
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+    }
 
-//     const std::vector<Eigen::Vector3d> frame;
+    // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
+    q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
 
-//     // convert points in pcl::PointCloud to std::vector<Eigen::Vector3d>
-//     for (const auto& pt: cloudIn->points)
-//     {
-//         Eigen::Vector3d pt_frame(pt.x, pt.y, pt.z);
-//         frame.emplace_back(Eigen::Vector3d());
-//     }
+    if (debug_print_qp_active_set_init_guess)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_initGuess_: " << t_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_initGuess_: " << q_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+    }
 
-//     const auto frame_downsample = lo_dev::VoxelDownsample(frame, voxel_size * 0.5);
-//     const auto source = lo_dev::VoxelDownsample(frame_downsample, voxel_size * 1.5);
-//     return {source, frame_downsample};
-// }
+    Eigen::VectorXd x(6); // state vector (roll, pitch, yaw, tx, ty, tz)
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
+        if (debug_print_qp_icp_iter_num)
+            RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
+
+        timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+        preparePointPlaneResidual();
+        timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+        // if (debug_print_qp_active_set_point_plane_residual_pose)
+        // {
+        //     RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_);
+        //     RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+        // }
+
+        // for debugging
+        if (debug_print_num_residuals) 
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "num. of pts nn found: " << numPtsNnFound_);
+            RCLCPP_INFO_STREAM(get_logger(), "num. of residual points: " << numResidual_);
+        }
+
+        // Non-linear optimization inner iteration (SQP)
+        for (int iter_qp = 0; iter_qp < config_.sqp_iteration_num_qp_active_set; iter_qp++)
+        {
+            if (debug_print_qp_sqp_iter_num)
+                RCLCPP_INFO_STREAM(get_logger(), "sqp_iter_num: " << iter_qp);
+
+            Eigen::MatrixXd A(numResidual_, 6); // stacked Jacobian
+            Eigen::MatrixXd b(numResidual_, 1); // residual vectorn
+            Eigen::MatrixXd b_for_kernel(numResidual_, 1); // residual vector to be used for kernel weight computation
+
+            timeLogger_.start("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
+            // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+            for (int i = 0; i < numResidual_; ++i) 
+            {
+                const Eigen::Vector3d bp = pointScanCurrInBForResidual_[i];
+                const Eigen::Vector3d wp = q_w_bCurrKf_ * bp + t_w_bCurrKf_; // should be updated at each iteration based on the current pose update
+                const Eigen::Vector3d wn = planeNormalForResidual_[i];  // plane normal (does not change depending on the current body pose)
+                const double d = planeDistFromOriginForResidual_[i];    // plane offset (does not change depending on the current body pose)
+
+                // Jacobian Computation
+                if(config_.pose_increment_multiplication == "right")
+                {
+                    // Right Jacobian
+                    Eigen::Matrix3d Rwb = q_w_bCurrKf_.toRotationMatrix();
+                    Eigen::Matrix3d bp_hat = getSkewSymMatrix(bp);
+                    // row i of A: [ -wn^T @ Rwb @ [bp]x  wn^T @ Rwb ]
+                    A.row(i).head<3>() = -wn.transpose() * Rwb * bp_hat;
+                    A.row(i).tail<3>() = wn.transpose() * Rwb;
+                    // residual b = - (wn^T @ wp + d)
+                    b(i) = - (wn.transpose() * wp + d);
+                    b_for_kernel(i) = b(i);             // for kernel weighting for robustifying the cost function, which is to be used later
+                    // following a conventional || A x - b' || notation
+                    // = || A x - (- (wn^T @ wp + d)) || 
+                    // = || A x + (wn^T @ wp + d) ||  
+                    // = || A x + b0 || where b0 = wn.transpose() * wp(0) + d
+                }
+                else if (config_.pose_increment_multiplication == "left")
+                {
+                    // Left Jacobian
+                    // row i of A: [ (p × n)^T  n^T ]
+                    A.row(i).head<3>() = wp.cross(wn).transpose();
+                    A.row(i).tail<3>() = wn.transpose();
+                    // residual b = - (wn^T @ wp + d)
+                    b(i) = - (wn.transpose() * wp + d);
+                    b_for_kernel(i) = b(i);
+                }
+                else
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), "Left or Right Jacobian is not defined. Jacobian is set to zero.");
+                }
+
+                // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+                // // auto residual = [&](const Eigen::Vector3d& w, const Eigen::Vector3d& t){
+                // //   return wn.dot( (Eigen::AngleAxisd(w.norm(), (w.norm()>1e-12)? w.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix() * bp) + t ) + d;
+                // // };
+                // Eigen::Vector3d w0 = Eigen::Vector3d::Zero();
+                // Eigen::Vector3d t0 = Eigen::Vector3d::Zero();
+
+                // // Your analytical J at (w0,t0): A_i = [ -n^T R [b]x , n^T R ] with R from current pose
+                // Eigen::RowVector<double,6> Ai;
+                // Ai.head<3>() = -wn.transpose() * Rwb * bp_hat;
+                // Ai.tail<3>() =  wn.transpose() * Rwb;
+
+                // // Finite-diff directional check
+                // Eigen::Matrix<double,6,1> v; v.setRandom(); v.normalize();
+                // double eps = 1e-8;
+                // Eigen::Vector3d dw = v.head<3>() * eps;
+                // Eigen::Vector3d dt = v.tail<3>() * eps;
+
+                // double r0 = wn.dot(Rwb*bp + t_w_bCurrKf_) + d;
+                // Eigen::Matrix3d R1 = Rwb * Eigen::AngleAxisd(dw.norm(), (dw.norm()>1e-12)? dw.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix();
+                // double r1 = wn.dot(R1*bp + (t_w_bCurrKf_ + Rwb*dt)) + d;
+
+                // double fd = (r1 - r0) / eps;
+                // double an = Ai * v;
+                // // std::cout << "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an) << "\n";
+                // RCLCPP_INFO_STREAM(get_logger(), "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an));
+                // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+
+            }
+            timeLogger_.stop("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
+
+            timeLogger_.start("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
+            Eigen::DiagonalMatrix<double, Eigen::Dynamic> D; // Jacobian Scaling Matrix
+            if (config_.turn_on_jacobian_column_scaling_qp_active_set)
+            {
+                // bounds/constraints scaled on the step x 
+                // Eigen::VectorXd lb_x, ub_x;        // direct bounds on x
+                // Eigen::MatrixXd Acon;              // general constraint matrix on x 
+                // Eigen::VectorXd Alb_x, Aub_x;
+
+                // 1) Build column-scaling matrix D so that columns of A_s = A * D have norm ~1 ---
+                const int n = A.cols();
+                Eigen::VectorXd col_norms(n);
+                for (int j = 0; j < n; ++j)
+                {
+                    col_norms(j) = A.col(j).norm();
+                }
+                const double eps   = 1e-12;    // avoid division by zero
+                const double dmin  = 1e-5;     // clamp factors to avoid extreme scaling
+                const double dmax  = 1e+5;
+                Eigen::VectorXd dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column
+                dj = dj.cwiseMax(dmin).cwiseMin(dmax);
+                // construct a column-scaling matrix D, where diagonal elements are dj
+                D = dj.asDiagonal();
+
+                // 2) Scaled Jacobian and transform bounds/constraints ---
+                // column scaling, matrix multiplication
+                Eigen::MatrixXd A_s = A * D;           // columns ~ unit-norm
+                // // If you have simple bounds on the step x, convert to z: z = D^{-1} x
+                // Eigen::VectorXd lb_z, ub_z;
+                // if (lb_x.size() == n && ub_x.size() == n) {
+                // // Dinv is just 1/dj
+                // Eigen::VectorXd d_inv = dj.cwiseInverse();
+                // lb_z = lb_x.cwiseProduct(d_inv);
+                // ub_z = ub_x.cwiseProduct(d_inv);
+                // }
+                // // If you have general linear constraints on x: Acon * x in [Alb_x, Aub_x]
+                // // convert to z: (Acon * D) * z ∈ [Alb_x, Aub_x]
+                // Eigen::MatrixXd Acon_z;
+                // if (Acon.size() > 0) Acon_z = Acon * D;
+
+                // 3) Build QP in z: min 1/2 z^T H_s z + h_s^T z ---
+                //  done in the following scripts
+
+                // Now that se have ||Ax - b||2 = ||(AD)(D^-1x) - b||2 = ||(A_s)z - b||2 
+                //  (A_s) =    AD   : column-wise scaled Jacobian
+                //    z   = (D^-1x) : scaled state vector (to be mapped back to x after solving QP)
+
+                // update A to As (column-wise scaled A)
+                A = A_s; 
+            }
+            timeLogger_.stop("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
+
+            // build the QP formulation
+            // min(xQP): 1/2 xQP.T @ HQP @ xQP + hQP.T @ xQP
+            // s.t.    : lb  <=   xQP   <= ub
+            //           Alb <= A @ xQP <= Aub
+
+            Eigen::Matrix<double,6,6> HQP = Eigen::Matrix<double,6,6>::Zero();  // Hessian in QP
+            Eigen::Matrix<double,6,1> hQP = Eigen::Matrix<double,6,1>::Zero();  // h matrix in QP
+
+            timeLogger_.start("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+            // compute the weights first based on the robust kernel
+            Eigen::VectorXd w;  
+            if(config_.turn_on_robust_kernel_qp_active_set)
+            {
+                // if(config_.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set)
+                // {
+                timeLogger_.start("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
+                double s = 0.0; // default scaling just as an option manually tune it
+                double c = 0.0; // default range just as an option manually tune it
+                timeLogger_.start("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
+                computeWeightsFromResiduals(b_for_kernel, w, s, config_.robust_kernel_qp_active_set, c, true);
+                timeLogger_.stop("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
+            }
+            else
+            {
+                w = Eigen::VectorXd::Ones(b_for_kernel.size());
+            }
+
+            if (debug_print_qp_active_set_matrices)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "w: ");
+                RCLCPP_INFO_STREAM(get_logger(), w.transpose());
+            }
+
+            timeLogger_.start("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
+            // Eigen::MatrixXd W = w.asDiagonal(); // This is super expensive, keep this just in case
+            Eigen::DiagonalMatrix<double, Eigen::Dynamic> W = w.asDiagonal();   // fast
+            timeLogger_.stop("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
+
+            timeLogger_.stop("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
+
+            if(config_.qp_active_set_Hessian_computation == "matrix_multiplication")
+            {
+                // cleaner but slow way
+                timeLogger_.start("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
+                HQP = 2 * A.transpose() * W * A;
+                hQP = - 2 * A.transpose() * W * b;
+                timeLogger_.stop("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
+            }
+            else if(config_.qp_active_set_Hessian_computation == "for_loop")
+            {
+                // fast way
+                timeLogger_.start("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
+                for (int i = 0; i < numResidual_; ++i) 
+                {
+                    double wi = w(i);
+                    Eigen::Matrix<double,1,6> ai = A.row(i);
+                    HQP.noalias() += 2.0 * wi * (ai.transpose() * ai);
+                    hQP.noalias() += - 2.0 * wi * ai.transpose() * b(i);
+                }
+                timeLogger_.stop("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
+            }
+            else
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "Hessian Computation is not defined well. Set Hessian to zero.");
+            }
+
+            if(config_.turn_on_levenberg_marquardt_qp_active_set)
+            {
+                timeLogger_.start("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
+                const double lambda = config_.levenberg_marquardt_lambda_qp_active_set;
+                if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping)
+                {
+                    HQP += 2.0 * lambda * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                }
+                else
+                {
+                    HQP += 2.0 * lambda * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                }
+                timeLogger_.stop("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
+            }
+            timeLogger_.stop("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+
+            // solution vector
+            Eigen::VectorXd xQP(6); // solution vector (roll, pitch, yaw, tx, ty, tz)
+
+            // scaler inequality constraints
+            // Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
+            // Eigen::VectorXd ub(6);
+            Eigen::VectorXd lb = Eigen::VectorXd(); // let's put lb ub default (no constraints)
+            Eigen::VectorXd ub = Eigen::VectorXd();
+
+            // setup the scaler constraints
+            const double vel = 
+                std::sqrt((t_w_bCurrKf_.x()-t_w_bPrevKf_.x())*(t_w_bCurrKf_.x()-t_w_bPrevKf_.x()) 
+                    + (t_w_bCurrKf_.y()-t_w_bPrevKf_.y())*(t_w_bCurrKf_.y()-t_w_bPrevKf_.y())) / (timeCurrScanEnd_ - timeCurrScanBeg_);
+            const double maxStrAng = 40 * (M_PI/180);   // [rad]
+            const double minStrAng = -40 * (M_PI/180);  // [rad]
+            const double whlbase = 2.3; // [m]
+            double maxYawRate = vel * std::tan(maxStrAng) / whlbase;
+            double minYawRate = vel * std::tan(minStrAng) / whlbase;
+
+            // let's try no constraints first
+            // for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
+            // {
+            //     lb(i) = - std::numeric_limits<double>::max();
+            //     ub(i) = std::numeric_limits<double>::max();
+            // }
+            // lb(2) = minYawRate; // let's try no constraints first
+            // ub(2) = maxYawRate;
+
+            // linear inequality constraint (We don't enforce linear constraint for now)
+            Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd();
+            Eigen::VectorXd Alb = Eigen::VectorXd();
+            Eigen::VectorXd Aub = Eigen::VectorXd();
+
+            if (debug_print_qp_active_set_matrices_jacobian_residual)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "A: " << A);
+                RCLCPP_INFO_STREAM(get_logger(), "b: " << b);
+            }
+
+            if (debug_print_qp_active_set_matrices)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "HQP: ");
+                RCLCPP_INFO_STREAM(get_logger(), HQP);
+                RCLCPP_INFO_STREAM(get_logger(), "hQP: ");
+                RCLCPP_INFO_STREAM(get_logger(), hQP);
+                RCLCPP_INFO_STREAM(get_logger(), "lb: " << lb);
+                RCLCPP_INFO_STREAM(get_logger(), "ub: " << ub);
+                // RCLCPP_INFO_STREAM(get_logger(), "vel: " << vel);
+                // RCLCPP_INFO_STREAM(get_logger(), "maxStrAng: " << maxStrAng);
+                // RCLCPP_INFO_STREAM(get_logger(), "minStrAng: " << minStrAng);
+                // RCLCPP_INFO_STREAM(get_logger(), "whlbase: " << whlbase);
+                // RCLCPP_INFO_STREAM(get_logger(), "maxYawRate: " << maxYawRate);
+                // RCLCPP_INFO_STREAM(get_logger(), "minYawRate: " << minYawRate);
+                RCLCPP_INFO_STREAM(get_logger(), "constraintMatrix: " << constraintMatrix);
+                RCLCPP_INFO_STREAM(get_logger(), "Alb: " << Alb);
+                RCLCPP_INFO_STREAM(get_logger(), "Aub: " << Aub);
+            }
+
+            timeLogger_.start("[SQP]: Solve QP", __FUNCTION__, __LINE__);
+            // set solver parameters and solve
+            qpmad::Solver qpmadSolver;   // Solver = SolverTemplate<double, Eigen::Dynamic, 1, Eigen::Dynamic>; in qpmad/solver.h
+            qpmad::SolverParameters param;
+            param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
+            qpmad::Solver::ReturnStatus status =
+                qpmadSolver.solve(xQP, HQP, hQP, lb, ub, constraintMatrix, Alb, Aub, param);
+            // [out] Vector primal – solution vector, mandatory, allocated if needed
+            // [in,out] Matrix H – Hessian, mandatory, non-empty, factorized in-place
+            // [in] Vector h – objective vector, mandatory, may be empty
+            // [in] Vector lb – vector of lower bounds, may be omitted or may be empty consistently with ub
+            // [in] Vector ub – vector of upper bounds, may be omitted or may be empty consistently with lb
+            // [in] Matrix A – general constraints matrix, may be omitted with all general constraints, may be empty
+            // [in] Vector Alb – lower bounds of general constraints, may be omitted with all general constraints, may be empty
+            // [in] Vector Aub – upper bounds of general constraints, may be omitted (if A and Alb are present they are assumed to be equality constraints), may be empty
+            // [in] SolverParameters param – solver parameters, may be omitted
+
+            // sanity check with Cholesky Decomposition linear solver
+            if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained)
+            {
+                auto H_test = HQP / 2;
+                auto h_test = - hQP / 2;
+                xQP = H_test.ldlt().solve(-h_test);
+            }
+
+            // check optimization status
+            if (status != qpmad::Solver::OK)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "Error in solving inequality constrained optimization problem with QPmad library.");
+            }
+
+            // extract the optimization status
+            Eigen::VectorXd dual;
+            Eigen::Matrix<qpmad::MatrixIndex, Eigen::Dynamic, 1> indices;
+            Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
+            qpmadSolver.getInequalityDual(dual, indices, is_lower);
+
+            if (debug_print_qp_active_set_solution_analysis)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
+                RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
+                if (constraintMatrix.size() == 0) 
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
+                } 
+                else if (constraintMatrix.cols() != xQP.size()) 
+                {
+                    RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
+                } 
+                else 
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * xQP).transpose());
+                }
+                // std::cout << constraintMatrix*xQP << std::endl;
+                // RCLCPP_INFO_STREAM(get_logger(), constraintMatrix*xQP);
+            }
+
+            // scale the solution back if necessary
+            if (config_.turn_on_jacobian_column_scaling_qp_active_set)
+            {   
+                Eigen::VectorXd z = xQP;
+                //    z   = (D^-1 x) : scaled state vector (to be mapped back to x after solving QP)
+                // --- 5) Map back to original variables (unscale) ---
+                x = D * z;  // x = Dz
+            }
+            else
+            {
+                x = xQP;
+            }
+            timeLogger_.stop("[SQP]: Solve QP", __FUNCTION__, __LINE__);
+
+            if (debug_print_qp_active_set_solution)
+            {
+                // for (unsigned int i=0; i<6; ++i)
+                // {
+                //     RCLCPP_INFO_STREAM(get_logger(), "xQP(" << i << "): " << xQP(i));
+                // }
+                // for (unsigned int i=0; i<6; ++i)
+                // {
+                //     RCLCPP_INFO_STREAM(get_logger(), "xQPfloat(" << i << "): " << xQPfloat(i));
+                // }
+                for (unsigned int i=0; i<6; ++i)
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), "x(" << i << "): " << x(i));
+                }
+            }
+
+            timeLogger_.start("[SQP]: Update solution pose", __FUNCTION__, __LINE__);
+
+            // Map state vector x (6DoF) to a transformation matrix via exp map in Sophus
+            // reorder the state vector to adjust to Sophus twist 
+            Eigen::Vector<double, 6> a;
+            a.tail<3>() = x.head<3>(); // axis-angle vector (alpha, beta, gamma)
+            a.head<3>() = x.tail<3>(); // translation vector (x,y,z)
+            const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
+            Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+
+            if (config_.pose_increment_multiplication == "left")
+            {
+                T = exp_x * T; // update by left multiplication
+            }
+            else 
+            {
+                T = T * exp_x; // update by right multiplication
+            }
+            q_w_bCurrKf_ = Eigen::Quaterniond(T.rotationMatrix());
+            q_w_bCurrKf_.normalize();
+            t_w_bCurrKf_ = T.translation();
+            timeLogger_.stop("[SQP]: Update solution pose", __FUNCTION__, __LINE__);
+
+            if (debug_print_qp_active_set_solution_pose_update)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "t_delta: " << exp_x.translation());
+                RCLCPP_INFO_STREAM(get_logger(), "q_delta: " << Eigen::Quaterniond(exp_x.rotationMatrix()));
+                RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+            }
+
+        } // QP inner iteration (SQP)
+
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
+
+    }
+    // end of the point-to-plane icp with inequality constraints
+}
+
+void Frontend::computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation)
+{
+    // compute a scale correction by using median absolute deviation(MAD):
+    //  https://en.wikipedia.org/wiki/Median_absolute_deviation
+    if (mad_scale_estimation)
+    {
+        timeLogger_.start("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
+        double r_med = getMedianInPlace(r);      // X_bar = median(X)
+        Eigen::VectorXd absdev = (r.array() - r_med).abs();
+        double absdev_med = getMedianInPlace(absdev);    // MAD = median(|Xi - X_bar|)
+        s = 1.4826 * std::max(absdev_med, 1e-12);   // 1.4826 makes MAD ~ σ for Gaussian. Also 1e-12 caring numerical stability
+        timeLogger_.stop("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
+    }
+
+    // compute robust kernel weights for each residuals
+    //  ref: http://ceres-solver.org/nnls_modeling.html#instances
+    // We need to refine these robust kernel weight computations.
+    const double eps = 1e-12;
+    w.resize(r.size());  // r should be resized with the decleration
+    for (int i = 0; i < r.size(); ++i) 
+    {
+        double ri = r(i);
+        double u  = ri / std::max(s, eps);
+        double wi = 1.0;
+        if (kernel == "Huber")
+        {
+            c = 1.345; // gives 95% efficiency for Gaussian noise
+            double a = std::abs(u);
+            wi = (a <= c) ? 1.0 : (c / (a + eps));
+        }
+        else if (kernel == "Cauchy")
+        {
+            c = 3.0; // typically 2.0 - 4.0
+            double t = (u*u) / (c*c);
+            wi = 1.0 / (1.0 + t);
+        }
+        else if (kernel == "Tukey")
+        {
+            c = 4.5; // typically 4.5
+            double a = std::abs(u);
+            if (a <= c) 
+            {
+                double z = 1.0 - (u*u)/(c*c);
+                wi = z*z;
+            } 
+            else 
+            {
+                wi = 0.0;
+            }
+        }
+        w(i) = wi;
+    }
+}
 
 
-// void Frontend::solveLeastSquaresInequalityConstrained()
-// {
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-//     if(!config_.use_voxel_map)
-//     {
-//         // set the local map point cloud to the kd_tree to nearest neighbor search
-//         timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
-//         kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
-//         timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
-//     }
-
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-    
-//     // set the initial guess as the current state estimation
-//     q_bPrevKf_bCurrKf_lo_ = q_bPrevKf_bCurrKf_initGuess_; 
-//     t_bPrevKf_bCurrKf_lo_ = t_bPrevKf_bCurrKf_initGuess_;
-
-//     // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
-//     t_w_bCurrKf_ = q_w_bCurrKf_ + t_bPrevKf_bCurrKf_lo_ + t_w_bCurrKf_;
-//     q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_lo_).normalized();
-
-//     // for the first iteration, we initialize the relative transformation the initialguess
-//     // Eigen::Vector3d x = log_map(
-//     //     // q_w_bCurrKf_.w(),
-//     //     // q_w_bCurrKf_.x(),
-//     //     // q_w_bCurrKf_.y(),
-//     //     // q_w_bCurrKf_.z(),
-//     //     q_bPrevKf_bCurrKf_lo_.w(),
-//     //     q_bPrevKf_bCurrKf_lo_.x(),
-//     //     q_bPrevKf_bCurrKf_lo_.y(),
-//     //     q_bPrevKf_bCurrKf_lo_.z(),
-//     // )
-//     // Since we have already adjust the current absolute pose to the initiaguess
-//     //  , and we will compute the relative transformation wrt the current pose,
-//     //  we can treat the current pose as origin (identity) and the initial pose update to be zero (in R^6)
-//     x = Eigen::Vector6d::Zero();
-
-//     // ICP iteration (point-to-plane)
-//     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
-//     {
-//         // // define a loss function with some kernel
-//         // ceres::LossFunction *lossFunction = new ceres::HuberLoss(0.1); // the Huber kernel is the same as liliom
-
-//         // // define rotation parameterization: we parameterize rotation as quarternion by using built-in parameterization in Ceres
-//         // // if you use variables that live on manifolds(Lie-Groups) you have to define local parameterizations to tell Ceres how to manipulate those variables
-//         // // translation components live on a common vector space so they don't need parameterization, but rotation components do.
-//         // ceres::LocalParameterization *quatParameterization = new ceres::QuaternionParameterization();
-
-//         // // create a problem object in Ceres
-//         // ceres::Problem problem;
-
-//         // // add a pointer to the rotation variables to optimize, with the parameterization
-//         // problem.AddParameterBlock(icpPoseParam, 4, quatParameterization);
-//         // // void Problem::AddParameterBlock(double *values, int size, Manifold *manifold)
-//         // //  -> icpPoseParam,4,quatParameterization = pointer to icpPoseParam[0] and 4 succeeding components in the array with manifold parameterization
-//         // //                                         = rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
-
-//         // // add a pointer to the translation variables to optimize 
-//         // problem.AddParameterBlock(icpPoseParam + 4, 3);
-//         // // void Problem::AddParameterBlock(double *values, int size)
-//         // //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
-//         // //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
-
-//         // set initial guess x(in R3) based on axis-angle representation
-//         // let's treat the current orientation is identity. (= frame origin)
-//         //  and convert the initial guess (in S(3)) to axis-angle representation
-        
-//         // Eigen::Vector3d x = log_map(
-//         //     // q_w_bCurrKf_.w(),
-//         //     // q_w_bCurrKf_.x(),
-//         //     // q_w_bCurrKf_.y(),
-//         //     // q_w_bCurrKf_.z(),
-//         //     q_bPrevKf_bCurrKf_lo_.w(),
-//         //     q_bPrevKf_bCurrKf_lo_.x(),
-//         //     q_bPrevKf_bCurrKf_lo_.y(),
-//         //     q_bPrevKf_bCurrKf_lo_.z(),
-//         // )
-
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-//         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
-//         preparePointPlaneResidual();
-//         // store point-plane residual computation on 
-//             // std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
-//             // std::vector<Eigen::Vector3d> planeNormDistForResidual_;
-//             // std::vector<double> pointPlaneDistForResidual_;
-//         timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
-
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-//         // for debugging
-//         if (debug_print_num_residuals) 
-//         {
-//             std::cout << "num. of pts nn found = " << numPtsNnFound_ << std::endl;
-//             std::cout << "num. of residual points = " << numResidual_ << std::endl;
-//         }
-
-//         // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
-//         for (int i = 0; i < numResidual_; ++i) 
-//         {
-//             // Construct an inequality constraint optimization problem based on point-plane parameters
-//             // 
-//             const Eigen::MatrixXd Adouble = A.template cast<double>();
-//             const Eigen::MatrixXd bdouble = b.template cast<double>();
-//             // construct Hessian(= A.T @ A), A: measurement Jacobian
-//             Eigen::MatrixXd HQP{ Adouble.transpose() * Adouble };
-//             // construct -A.T @ b, A: Jacobian, b: residual vector
-//             Eigen::VectorXd hQP{ -Adouble.transpose() * bdouble };
-
-//             Eigen::VectorXd xQP;
-//             Eigen::VectorXd lb;
-//             Eigen::VectorXd ub;
-//             Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd::Zero(numberOfConstraints, 6);
-//             Eigen::VectorXd Alb = Eigen::VectorXd::Zero(numberOfConstraints, 1);
-//             Eigen::VectorXd Aub = Eigen::VectorXd::Zero(numberOfConstraints, 1);
-//         }
-
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-//         // // set some solver parameters
-//         // ceres::Solver::Options solverOptions;
-//         // solverOptions.linear_solver_type = ceres::DENSE_QR;
-//         // solverOptions.max_num_iterations = config_.max_iterations;
-//         // solverOptions.max_solver_time_in_seconds = config_.max_solver_time_in_seconds;
-//         // solverOptions.minimizer_progress_to_stdout = false;
-//         // solverOptions.check_gradients = false;
-//         // solverOptions.gradient_check_relative_precision = 1e-2;
-//         // ceres::Solver::Summary summary;
-//         // timeLogger_.start("ceres::Solve", __FUNCTION__, __LINE__);
-//         // // solve the least squares for this round in ICP
-//         // ceres::Solve(solverOptions, &problem, &summary);
-//         // timeLogger_.stop("ceres::Solve", __FUNCTION__, __LINE__);
-
-//         // set solver parameters and solve
-//         qpmad::Solver solverStandard;   // Solver = SolverTemplate<double, Eigen::Dynamic, 1, Eigen::Dynamic>; in qpmad/solver.h
-//         qpmad::SolverParameters param;
-//         param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
-//         qpmad::Solver::ReturnStatus status =
-//             solverStandard.solve(xQP, HQP, hQP, Eigen::VectorXd(), Eigen::VectorXd(), constraintMatrix, Alb, Aub, param);
-
-// // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-//         // check optimization status
-//         if (status != qpmad::Solver::OK)
-//         {
-//             LOG_WARNING_STREAM("Error in solving inequality constrained optimization problem with QPmad library.");
-//         }
-//         Eigen::VectorXd dual;
-//         Eigen::Matrix<qpmad::MatrixIndex, Eigen::Dynamic, 1> indices;
-//         Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
-//         int activeInequalityConstraintSize = 0;
-//         solverStandard.getInequalityDual(dual, indices, is_lower);
-//         std::cout << "Number of active Inquality Constraints: " << dual.size() << std::endl;
-//         activeInequalityConstraints = dual.size();
-//         std::cout << "Do Constraints satisfied? 0 == satisfied: " << std::endl;
-//         std::cout << constraintMatrix*xQP << std::endl;
-
-//         // update the state vector
-//         const Eigen::VectorXf xQPfloat = xQP.template cast<float>();
-//         x.row(0) << xQPfloat(0);
-//         x.row(1) << xQPfloat(1);
-//         x.row(2) << xQPfloat(2);
-//         x.row(3) << xQPfloat(3);
-//         x.row(4) << xQPfloat(4);
-//         x.row(5) << xQPfloat(5);        
-
-//         // // make sure w in rotation quaternion is positive (carried over from liliom)
-//         // // this might not be necesary but keep it just in case
-//         // if(icpPoseParam[0] < 0) 
-//         // {
-//         //     Eigen::Quaterniond tmpQ(icpPoseParam[0],
-//         //             icpPoseParam[1],
-//         //             icpPoseParam[2],
-//         //             icpPoseParam[3]);
-//         //     tmpQ = unifyQuaternion(tmpQ);
-//         //     icpPoseParam[0] = tmpQ.w();
-//         //     icpPoseParam[1] = tmpQ.x();
-//         //     icpPoseParam[2] = tmpQ.y();
-//         //     icpPoseParam[3] = tmpQ.z();
-//         // }
-
-//         pointScanCurrForResidual_.clear();
-//         planeNormDistForResidual_.clear();
-//         pointPlaneDistForResidual_.clear();
-
-//         // update the pose variables to the latest optimized ones
-//         // icpPoseParam[] is what is being optimized in the Ceres process above
-//         // we need to update the pose (q_w_bCurrKf_, t_w_bCurrKf_) to re-compute the nearest neighbor points and planes in preparePointPlaneResidual() at each iteration
-//         // , so we have to update the pose variables(q_w_bCurrKf_, t_w_bCurrKf_) at each ICP iteration.
-//         // q_w_bCurrKf_ = Eigen::Quaterniond(
-//         //                     icpPoseParam[0],
-//         //                     icpPoseParam[1],
-//         //                     icpPoseParam[2],
-//         //                     icpPoseParam[3]);
-//         // t_w_bCurrKf_ = Eigen::Vector3d(
-//         //                     icpPoseParam[4],
-//         //                     icpPoseParam[5],
-//         //                     icpPoseParam[6]);
-
-//         // update the estimated relative pose
-//         // q_bPrevKf_bCurrKf_lo_ += expmap_based_on(x.row(0), x.row(2), x.row(2));
-//         // t_bPrevKf_bCurrKf_lo_  += update_based_on(x.row(3), x.row(4), x.row(5));
-
-//         // update the current estimated absolute pose in world frame
-//         // (since it is used for preparePointPlaneResidual())
-//         // q_w_bCurrKf_ = q_w_bCurrKf_ * q_bPrevKf_bCurrKf_lo_;
-//         // t_w_bCurrKf_ = t_w_bCurrKf_ + t_bPrevKf_bCurrKf_lo_;
-
-//         // x = Eigen::Vector3d::Zero() 
-//     }
-//     // end of the point-to-plane icp with inequality constraints
-// }
 
 } // namespace lo_dev

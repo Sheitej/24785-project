@@ -105,6 +105,16 @@ extern bool debug_print_num_factors_values;
 extern bool debug_print_num_downsampled_point;
 extern bool debug_print_num_point_in_voxel_map;
 extern bool debug_dump_log_file_voxel_ids;
+extern bool debug_print_qp_active_set;
+extern bool debug_print_qp_active_set_init_guess;
+extern bool debug_print_qp_active_set_matrices;
+extern bool debug_print_qp_active_set_matrices_jacobian_residual;
+extern bool debug_print_qp_active_set_solution_analysis;
+extern bool debug_print_qp_active_set_solution;
+extern bool debug_print_qp_active_set_solution_pose_update;
+extern bool debug_print_qp_icp_iter_num;
+extern bool debug_print_qp_sqp_iter_num;
+extern bool debug_try_qp_active_set_Cholesky_Decomposition_unconstrained;
 
 
 // for initialization parameter

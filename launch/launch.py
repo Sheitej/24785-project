@@ -52,7 +52,20 @@ def generate_launch_description():
         ],
         remappings=[
             ("laser_odom_to_init", LaunchConfiguration("odom_topic")),
-        ]
+        ],
+        # arguments=[      # for debug printing out 
+        #     '--ros-args', '--log-level', 'DEBUG'
+        # ] 
+    )
+
+    sigterm_timeout_arg = DeclareLaunchArgument(
+        "sigterm_timeout",
+        default_value="36000.0",
+    )
+
+    sigkill_timeout_arg = DeclareLaunchArgument(
+        "sigkill_timeout",
+        default_value="36000.0",
     )
 
     rviz2_node = Node(
@@ -70,6 +83,8 @@ def generate_launch_description():
         odom_topic_arg,
         world_frame_arg,
         sensor_frame_arg,
+        sigterm_timeout_arg,
+        sigkill_timeout_arg,
         frontend_node,
         rviz2_node,
     ])

@@ -58,8 +58,9 @@
         max_solver_time_in_seconds: 0.015     # 0.015 in liliom
         voxel_filter_size: 0.4      # pcl::voxelfiltersize()
         max_cloud_frame_for_local_map: 5
-        icp_iteration_num: 10           # This is super important [current best] works but kind of slow
+        # icp_iteration_num: 10           # This is super important [current best] works but kind of slow
         # icp_iteration_num: 5              # 5 and 7 does not work
+        icp_iteration_num: 20           # for QP active set, 20 sounds too many but runs in real-time pretty much
         use_liosam_gauss_newton: false
         use_fastlio_point_plane_residual_param: true    # default: true
         build_local_map_from_all_global_map: false
@@ -74,6 +75,21 @@
         g_norm: 9.80511    # 0 means you need to provide both imu-camera and laser-camera extrinsic
         lag: 1.0
         use_lo_prior_factor_wo_between_factor: false
+
+        # ---- for inequality constraints ----
+        turn_on_qp_ineq_constraints_active_set: true
+        sqp_iteration_num_qp_active_set: 5
+        turn_on_levenberg_marquardt_qp_active_set: true   # true: LM method, false: Gauss Netwon
+        levenberg_marquardt_lambda_qp_active_set: 1.0
+        turn_on_levenberg_marquardt_qp_active_set_marquardt_damping: true # true: JTJ+lambda*(diag(JTJ)) damping, false: JTJ+lambda*I damping,  
+        turn_on_robust_kernel_qp_active_set: true
+        turn_on_mad_based_scaling_for_kernel_weights_qp_active_set: true
+        robust_kernel_qp_active_set: "Huber"
+        turn_on_jacobian_column_scaling_qp_active_set: false
+        pose_increment_multiplication: "right"  # "right": right Jacobian, "left": left Jacobian
+        turn_on_Sophus_SE3_update: false
+        qp_active_set_Hessian_computation: "for_loop" # "matrix_multiplication" or "for_loop"
+        
 
     debug:
         print_imu_forward_propagation_state: false
@@ -101,13 +117,23 @@
         print_num_downsampled_point: false
         print_num_point_in_voxel_map: false
         dump_log_file_voxel_ids: false
+        print_qp_active_set: false
+        print_qp_active_set_init_guess: false
+        print_qp_active_set_matrices_jacobian_residual: false   # can be too many printed lines
+        print_qp_active_set_matrices: false
+        print_qp_active_set_solution_analysis: false
+        print_qp_active_set_solution: false
+        print_qp_active_set_solution_pose_update: false
+        print_qp_icp_iter_num: false
+        print_qp_sqp_iter_num: false
+        try_qp_active_set_Cholesky_Decomposition_unconstrained: false
 
     init:
         imu_init_fastlio2: false
 
     imu:
         isotropic_scale_calibration_to_G: false
-        enalbe_init_guess_for_lo: false
+        enalbe_init_guess_for_lo: true
 
 
     ## Isaac Sim

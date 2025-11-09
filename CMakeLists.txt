@@ -51,6 +51,7 @@ find_package(Ceres REQUIRED)
 find_package(GTSAM REQUIRED QUIET)
 find_package(TBB REQUIRED)  # not used but keep
 find_package(tsl-robin-map REQUIRED)
+find_package(qpmad REQUIRED)
 # find_package(livox_ros_driver2 REQUIRED)
 
 find_package(OpenMP REQUIRED)
@@ -66,6 +67,7 @@ include_directories(
   ${Sophus_INCLUDE_DIRS}
   ${pcl_conversions_INCLUDE_DIRS}
   ${tsl-robin-map_INCLUDE_DIRS}
+  ${qpmad_INCLUDE_DIRS}
   # ${livox_ros_driver2_INCLUDE_DIRS}
 )
 
@@ -76,6 +78,7 @@ link_directories(
   ${OpenCV_LIBRARY_DIRS}
   ${GTSAM_LIBRARY_DIRS}
   ${tsl-robin-map_LIBRARY_DIRS}
+  ${qpmad_LIBRARY_DIRS}
 )
 
 set(GTSAM_LIBRARIES gtsam)
@@ -119,6 +122,7 @@ target_link_libraries(LoDevLib
   ${CERES_LIBRARIES}
   ${tsl-robin-map_LIBRARIES}
   OpenMP::OpenMP_CXX
+  ${qpmad_LIBRARIES}
 )
 
 # Frontend node
@@ -133,6 +137,9 @@ target_link_libraries(frontend_node
 
 # Install Exported Libraries
 ament_export_targets(export_lo_dev HAS_LIBRARY_TARGET)
+
+# just to set a compile time flag for QPmad debugging
+target_compile_definitions(frontend_node PRIVATE QPMAD_ENABLE_TRACING)
 
 install(
   DIRECTORY include/
