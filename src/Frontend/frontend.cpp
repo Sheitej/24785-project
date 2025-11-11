@@ -1,8 +1,6 @@
 #include <lo_dev/Frontend/frontend.h>
-#include <sophus/se3.hpp>
-#include <sophus/so3.hpp>
 
-namespace lo_dev 
+namespace lo_dev
 {    
 
 Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", options)
@@ -105,6 +103,8 @@ bool Frontend::readParameters()
     this->declare_parameter<bool>("frontend_node.use_liosam_gauss_newton", false);
     this->declare_parameter<bool>("frontend_node.use_fastlio_point_plane_residual_param", false);
     this->declare_parameter<bool>("frontend_node.build_local_map_from_all_global_map", false);
+    this->declare_parameter<std::string>("frontend_node.initial_guess_source", "");
+    this->declare_parameter<std::string>("frontend_node.motion_compensation_source", "");
 
     config_.max_iterations = this->get_parameter("frontend_node.max_iterations").as_int();
     config_.max_solver_time_in_seconds = this->get_parameter("frontend_node.max_solver_time_in_seconds").as_double();
@@ -114,6 +114,8 @@ bool Frontend::readParameters()
     config_.use_liosam_gauss_newton = this->get_parameter("frontend_node.use_liosam_gauss_newton").as_bool();
     config_.use_fastlio_point_plane_residual_param = this->get_parameter("frontend_node.use_fastlio_point_plane_residual_param").as_bool();
     config_.build_local_map_from_all_global_map = this->get_parameter("frontend_node.build_local_map_from_all_global_map").as_bool();
+    config_.initial_guess_source = this->get_parameter("frontend_node.initial_guess_source").as_string();
+    config_.motion_compensation_source = this->get_parameter("frontend_node.motion_compensation_source").as_string();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "max_iterations: " << config_.max_iterations);
     RCLCPP_INFO_STREAM(this->get_logger(), "max_solver_time_in_seconds: " << config_.max_solver_time_in_seconds);
@@ -123,6 +125,8 @@ bool Frontend::readParameters()
     RCLCPP_INFO_STREAM(this->get_logger(), "use_liosam_gauss_newton: " << config_.use_liosam_gauss_newton);
     RCLCPP_INFO_STREAM(this->get_logger(), "use_fastlio_point_plane_residual_param: " << config_.use_fastlio_point_plane_residual_param);
     RCLCPP_INFO_STREAM(this->get_logger(), "build_local_map_from_all_global_map: " << config_.build_local_map_from_all_global_map);
+    RCLCPP_INFO_STREAM(this->get_logger(), "initial_guess_source: " << config_.initial_guess_source);
+    RCLCPP_INFO_STREAM(this->get_logger(), "motion_compensation_source: " << config_.motion_compensation_source);
 
 
     // ---- parameters for factor graph (currently not implemented and might or might not be used in the future) ---- 
@@ -146,6 +150,7 @@ bool Frontend::readParameters()
 
     // ---- parameters for inequality constraints ---- 
     this->declare_parameter<bool>("frontend_node.turn_on_qp_ineq_constraints_active_set",false);
+    this->declare_parameter<bool>("frontend_node.turn_on_ineq_constraints",false);
     this->declare_parameter<int>("frontend_node.sqp_iteration_num_qp_active_set", 10);
     this->declare_parameter<bool>("frontend_node.turn_on_levenberg_marquardt_qp_active_set", false);
     this->declare_parameter<double>("frontend_node.levenberg_marquardt_lambda_qp_active_set", 2.0);
@@ -157,8 +162,12 @@ bool Frontend::readParameters()
     this->declare_parameter<std::string>("frontend_node.pose_increment_multiplication", "left");
     this->declare_parameter<bool>("frontend_node.turn_on_Sophus_SE3_update", true);
     this->declare_parameter<std::string>("frontend_node.qp_active_set_Hessian_computation", "for_loop");
+    this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.max_steering_angle", 0.0);
+    this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.min_steering_angle", 0.0);
+    this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.wheel_base", 0.0);
 
     config_.turn_on_qp_ineq_constraints_active_set = this->get_parameter("frontend_node.turn_on_qp_ineq_constraints_active_set").as_bool();
+    config_.turn_on_ineq_constraints = this->get_parameter("frontend_node.turn_on_ineq_constraints").as_bool();
     config_.sqp_iteration_num_qp_active_set = this->get_parameter("frontend_node.sqp_iteration_num_qp_active_set").as_int();
     config_.turn_on_levenberg_marquardt_qp_active_set = this->get_parameter("frontend_node.turn_on_levenberg_marquardt_qp_active_set").as_bool();
     config_.levenberg_marquardt_lambda_qp_active_set = this->get_parameter("frontend_node.levenberg_marquardt_lambda_qp_active_set").as_double();
@@ -170,8 +179,12 @@ bool Frontend::readParameters()
     config_.pose_increment_multiplication = this->get_parameter("frontend_node.pose_increment_multiplication").as_string();
     config_.turn_on_Sophus_SE3_update = this->get_parameter("frontend_node.turn_on_Sophus_SE3_update").as_bool();
     config_.qp_active_set_Hessian_computation = this->get_parameter("frontend_node.qp_active_set_Hessian_computation").as_string();
+    config_.vehicle_kinematic_constraints_max_steering_angle = this->get_parameter("frontend_node.vehicle_kinematic_constraints.max_steering_angle").as_double();
+    config_.vehicle_kinematic_constraints_min_steering_angle = this->get_parameter("frontend_node.vehicle_kinematic_constraints.min_steering_angle").as_double();
+    config_.vehicle_kinematic_constraints_wheel_base = this->get_parameter("frontend_node.vehicle_kinematic_constraints.wheel_base").as_double();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_qp_ineq_constraints_active_set: " << config_.turn_on_qp_ineq_constraints_active_set);
+    RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_ineq_constraints: " << config_.turn_on_ineq_constraints);
     RCLCPP_INFO_STREAM(this->get_logger(), "sqp_iteration_num: " << config_.sqp_iteration_num_qp_active_set);
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_levenberg_marquardt: " << config_.turn_on_levenberg_marquardt_qp_active_set);
     RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_lambda: " << config_.levenberg_marquardt_lambda_qp_active_set);
@@ -183,6 +196,9 @@ bool Frontend::readParameters()
     RCLCPP_INFO_STREAM(this->get_logger(), "pose_increment_multiplication: " << config_.pose_increment_multiplication);
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_Sophus_SE3_update: " << config_.turn_on_Sophus_SE3_update);
     RCLCPP_INFO_STREAM(this->get_logger(), "qp_active_set_Hessian_computation: " << config_.qp_active_set_Hessian_computation);
+    RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints_max_steering_angle: " << config_.vehicle_kinematic_constraints_max_steering_angle);
+    RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints.min_steering_angle: " << config_.vehicle_kinematic_constraints_min_steering_angle);
+    RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints.wheel_base: " << config_.vehicle_kinematic_constraints_wheel_base);
 
     return true;
 }
@@ -591,7 +607,8 @@ void Frontend::makeInitialGuess()
     Eigen::Vector3d t_bKfWdBeg_bKfWdEnd;
     
     // if enable the initial guess for LO based on imu, set a transformation
-    if (imu_enalbe_init_guess_for_lo)
+    // if (imu_enalbe_init_guess_for_lo) // should be config_.initguess == "imu"
+    if (config_.initial_guess_source == "imu") // should be config_.initguess == "imu"
     {
         Eigen::Quaterniond q_w_bKfWindowBeg;
         Eigen::Vector3d t_w_bKfWindowBeg;
@@ -606,6 +623,12 @@ void Frontend::makeInitialGuess()
         // t_w_bKfWindowEnd_ - t_w_bKfWindowBeg : translation of beg->end in world frame
         // q_w_bKfWindowBeg.inverse() * {above} = q_bKfWindowBeg_w * {above}
         //                                      = translation of beg->end in beg frame (OK)
+    }
+    else if(config_.initial_guess_source == "constant velocity") // should be config_.initguess == "imu"
+    {
+        // take the previous relative motion
+        q_bKfWdBeg_bKfWdEnd = q_bPrev2Kf_bPrevKf_;
+        t_bKfWdBeg_bKfWdEnd = t_bPrev2Kf_bPrevKf_;
     }
     else
     {
@@ -630,74 +653,140 @@ void Frontend::deskewPointCloud()
 {   
     Eigen::Quaterniond q_w_bKfWindowEnd_;
     Eigen::Vector3d t_w_bKfWindowEnd_;
-    getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
 
-    // for debugging
-    if(debug_print_deskew_pointcloud)
-        std::cout << "std::prev(imuPoseTimeline_.end()) -> second = " << std::prev(imuPoseTimeline_.end())->second << std::endl;
-
-    // for debugging
-    if(debug_print_scan_imu_time_sync)
+    if(config_.motion_compensation_source == "imu")
     {
-        RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanBeg_ = " << std::fixed << timeCurrScanBeg_);
-        RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_ = " << std::fixed << timeCurrScanEnd_);
-        RCLCPP_INFO_STREAM(get_logger(), "imuPoseTimeline_.begin()->first = " << std::fixed << imuPoseTimeline_.begin()->first);
-        RCLCPP_INFO_STREAM(get_logger(), "std::prev(imuPoseTimeline_.end())->first = " << std::fixed << std::prev(imuPoseTimeline_.end())->first);
-    }
-
-    for (auto &point: cloudKfWindow_->points)
-    {
-        double pointTime = timeCurrScanBeg_ + point.curvature; // !! curvature contains time[sec] !!
-
-        // get an imu pose interpolated based on the point time
-        Eigen::Quaterniond q_w_bPtTime;
-        Eigen::Vector3d t_w_bPtTime;
-        getImuPoseAtPointMeasurementTime(pointTime, q_w_bPtTime, t_w_bPtTime);
-
-        Eigen::Quaterniond q_bKfWindowEnd_bPtTime;
-        Eigen::Vector3d t_bKfWindowEnd_bPtTime;
-        q_bKfWindowEnd_bPtTime = (q_w_bKfWindowEnd_.inverse() * q_w_bPtTime).normalized();
-        t_bKfWindowEnd_bPtTime = q_w_bKfWindowEnd_.inverse() * (t_w_bPtTime - t_w_bKfWindowEnd_);
-
-        Eigen::Vector3d t_bPtTime_pt(point.x, point.y, point.z);
-        Eigen::Vector3d t_bKfWindowEnd_pt;
-        t_bKfWindowEnd_pt = q_bKfWindowEnd_bPtTime * t_bPtTime_pt + t_bKfWindowEnd_bPtTime;
+        getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
 
         // for debugging
         if(debug_print_deskew_pointcloud)
+            std::cout << "std::prev(imuPoseTimeline_.end()) -> second = " << std::prev(imuPoseTimeline_.end())->second << std::endl;
+
+        // for debugging
+        if(debug_print_scan_imu_time_sync)
         {
-            RCLCPP_INFO_STREAM(get_logger(), "START DESKEWING - pt: ( " << point.x << ", " << point.y << ", " << point.z << " )");
-            RCLCPP_INFO_STREAM(get_logger(), "t_w_bPtTime = " << t_w_bPtTime.transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "q_w_bPtTime = " << q_w_bPtTime.coeffs().transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "t_w_bKfWindowEnd_ = " << t_w_bKfWindowEnd_.transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "q_w_bKfWindowEnd_ = " << q_w_bKfWindowEnd_.coeffs().transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_bPtTime = " << t_bKfWindowEnd_bPtTime.transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "q_bKfWindowEnd_bPtTime = " << q_bKfWindowEnd_bPtTime.coeffs().transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_pt = " << t_bKfWindowEnd_pt.transpose());
-            RCLCPP_INFO_STREAM(get_logger(), "END DESKEWING   - pt: ( " << t_bKfWindowEnd_pt.x() << ", " << t_bKfWindowEnd_pt.y() << ", " << t_bKfWindowEnd_pt.z() << " )");
+            RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanBeg_ = " << std::fixed << timeCurrScanBeg_);
+            RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_ = " << std::fixed << timeCurrScanEnd_);
+            RCLCPP_INFO_STREAM(get_logger(), "imuPoseTimeline_.begin()->first = " << std::fixed << imuPoseTimeline_.begin()->first);
+            RCLCPP_INFO_STREAM(get_logger(), "std::prev(imuPoseTimeline_.end())->first = " << std::fixed << std::prev(imuPoseTimeline_.end())->first);
         }
 
-        PointType ptDeskewed;
-        ptDeskewed.x = t_bKfWindowEnd_pt.x();
-        ptDeskewed.y = t_bKfWindowEnd_pt.y();
-        ptDeskewed.z = t_bKfWindowEnd_pt.z();
-        ptDeskewed.curvature = point.curvature;
-        ptDeskewed.intensity = point.intensity;
-
-        if(config_.enable_min_range_filter)
+        // can be multi-threaded by replacing push_back
+        for (auto &point: cloudKfWindow_->points)
         {
-            // std::cout << "Store a point that meets the min range filter" << std::endl;
-            const double ptDisSq = ptDeskewed.x*ptDeskewed.x + ptDeskewed.y*ptDeskewed.y + ptDeskewed.z*ptDeskewed.z;
-            const double minThrDisSq = config_.lidar_min_range*config_.lidar_min_range;
-            if(ptDisSq > minThrDisSq)
+            double pointTime = timeCurrScanBeg_ + point.curvature; // !! curvature contains time[sec] !!
+
+            // get an imu pose interpolated based on the point time
+            Eigen::Quaterniond q_w_bPtTime;
+            Eigen::Vector3d t_w_bPtTime;
+            getImuPoseAtPointMeasurementTime(pointTime, q_w_bPtTime, t_w_bPtTime);
+
+            Eigen::Quaterniond q_bKfWindowEnd_bPtTime;
+            Eigen::Vector3d t_bKfWindowEnd_bPtTime;
+            q_bKfWindowEnd_bPtTime = (q_w_bKfWindowEnd_.inverse() * q_w_bPtTime).normalized();
+            t_bKfWindowEnd_bPtTime = q_w_bKfWindowEnd_.inverse() * (t_w_bPtTime - t_w_bKfWindowEnd_);
+
+            Eigen::Vector3d t_bPtTime_pt(point.x, point.y, point.z);
+            Eigen::Vector3d bKfWindowEnd_pt;
+            bKfWindowEnd_pt = q_bKfWindowEnd_bPtTime * t_bPtTime_pt + t_bKfWindowEnd_bPtTime;
+
+            // for debugging
+            if(debug_print_deskew_pointcloud)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "START DESKEWING - pt: ( " << point.x << ", " << point.y << ", " << point.z << " )");
+                RCLCPP_INFO_STREAM(get_logger(), "t_w_bPtTime = " << t_w_bPtTime.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_w_bPtTime = " << q_w_bPtTime.coeffs().transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "t_w_bKfWindowEnd_ = " << t_w_bKfWindowEnd_.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_w_bKfWindowEnd_ = " << q_w_bKfWindowEnd_.coeffs().transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_bPtTime = " << t_bKfWindowEnd_bPtTime.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_bKfWindowEnd_bPtTime = " << q_bKfWindowEnd_bPtTime.coeffs().transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "bKfWindowEnd_pt = " << bKfWindowEnd_pt.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "END DESKEWING   - pt: ( " << bKfWindowEnd_pt.x() << ", " << bKfWindowEnd_pt.y() << ", " << bKfWindowEnd_pt.z() << " )");
+            }
+
+            PointType ptDeskewed;
+            ptDeskewed.x = bKfWindowEnd_pt.x();
+            ptDeskewed.y = bKfWindowEnd_pt.y();
+            ptDeskewed.z = bKfWindowEnd_pt.z();
+            ptDeskewed.curvature = point.curvature;
+            ptDeskewed.intensity = point.intensity;
+
+            if(config_.enable_min_range_filter)
+            {
+                // std::cout << "Store a point that meets the min range filter" << std::endl;
+                const double ptDisSq = ptDeskewed.x*ptDeskewed.x + ptDeskewed.y*ptDeskewed.y + ptDeskewed.z*ptDeskewed.z;
+                const double minThrDisSq = config_.lidar_min_range*config_.lidar_min_range;
+                if(ptDisSq > minThrDisSq)
+                {
+                    cloudScanCurr_->points.push_back(ptDeskewed);
+                }
+            }
+            else
             {
                 cloudScanCurr_->points.push_back(ptDeskewed);
             }
+            // eventually get away from pcl::pointcloud cloudScanCurr_ and move to std::vector<Eigen:Vector3d> for the points container
         }
-        else
+    } 
+    else if (config_.motion_compensation_source == "constant velocity")
+    {
+        // follows kiss-icp way
+        const double min_time = timeCurrScanBeg_ + cloudKfWindow_->points.front().curvature;
+        const double max_time = timeCurrScanBeg_ + cloudKfWindow_->points.back().curvature;
+
+        const Sophus::SE3d relative_motion(q_bPrev2Kf_bPrevKf_.toRotationMatrix(), t_bPrev2Kf_bPrevKf_);
+        const auto &xi = relative_motion.log();
+
+        // q_w_bKfWindowEnd_ = (q_w_bPrevKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
+        // t_w_bKfWindowEnd_ = t_w_bPrevKf_ + q_w_bPrevKf_ * t_bPrevKf_bCurrKf_initGuess_;
+        // const Sophus::SE3d T_w_bKfWindowEnd(q_w_bKfWindowEnd_.toRotationMatrix(), t_w_bKfWindowEnd_);
+
+        for (const auto &point: cloudKfWindow_->points)
         {
-            cloudScanCurr_->points.push_back(ptDeskewed);
+            Eigen::Vector3d bPtTime_pt(point.x, point.y, point.z);
+            double pointTime = timeCurrScanBeg_ + point.curvature; // !! curvature contains time[sec] !!
+            const auto stamp = (pointTime - min_time) / (max_time - min_time);
+            auto T_bKfWindowEnd_bPtTime = Sophus::SE3d::exp((stamp - 1.0) * xi);
+        
+            // bKfWindowEnd_pt = q_bKfWindowEnd_bPtTime * t_bPtTime_pt + t_bKfWindowEnd_bPtTime;
+            Eigen::Vector3d bKfWindowEnd_pt;
+            bKfWindowEnd_pt = T_bKfWindowEnd_bPtTime * bPtTime_pt;
+
+            // for debugging
+            if(debug_print_deskew_pointcloud)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "START DESKEWING - pt: ( " << point.x << ", " << point.y << ", " << point.z << " )");
+                RCLCPP_INFO_STREAM(get_logger(), "t_bKfWindowEnd_bPtTime = " << T_bKfWindowEnd_bPtTime.translation().transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_bKfWindowEnd_bPtTime = " << Eigen::Quaterniond(T_bKfWindowEnd_bPtTime.rotationMatrix()));
+                RCLCPP_INFO_STREAM(get_logger(), "bKfWindowEnd_pt = " << bKfWindowEnd_pt.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "END DESKEWING   - pt: ( " << bKfWindowEnd_pt.x() << ", " << bKfWindowEnd_pt.y() << ", " << bKfWindowEnd_pt.z() << " )");
+            }
+
+            PointType ptDeskewed;
+            ptDeskewed.x = bKfWindowEnd_pt.x();
+            ptDeskewed.y = bKfWindowEnd_pt.y();
+            ptDeskewed.z = bKfWindowEnd_pt.z();
+
+            if(config_.enable_min_range_filter)
+            {
+                // std::cout << "Store a point that meets the min range filter" << std::endl;
+                const double ptDisSq = ptDeskewed.x*ptDeskewed.x + ptDeskewed.y*ptDeskewed.y + ptDeskewed.z*ptDeskewed.z;
+                const double minThrDisSq = config_.lidar_min_range*config_.lidar_min_range;
+                if(ptDisSq > minThrDisSq)
+                {
+                    cloudScanCurr_->points.push_back(ptDeskewed);
+                }
+            }
+            else
+            {
+                cloudScanCurr_->points.push_back(ptDeskewed);
+            }
+            // eventually get away from pcl::pointcloud cloudScanCurr_ and move to std::vector<Eigen:Vector3d> for the points container
         }
+    }
+    else
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "motion_compensation_source is not defined. Skip point cloud deskewing.");
     }
 }
 
@@ -1471,7 +1560,7 @@ void Frontend::run()
 
 // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
-    if(config_.turn_on_qp_ineq_constraints_active_set && velocity_ready_)
+    if(config_.turn_on_qp_ineq_constraints_active_set)
     {
         timeLogger_.start("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
         solveLeastSquares_InequalityConstraints_ActiveSet();
@@ -1485,7 +1574,7 @@ void Frontend::run()
         solveLeastSquares();    // unconstrained least squares
         timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
         
-        velocity_ready_ = true;
+        // velocity_ready_ = true;
     }
     
 // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
@@ -1823,10 +1912,18 @@ void Frontend::clearProcess()
     cloudCurrentScanInWorld_->clear();
     cloudScanCurrInWorld_vecEigen_.clear();
 
+    timePrev2ScanEnd_ = timePrevScanEnd_;
     timePrevScanEnd_ = timeCurrScanEnd_;
 
+    q_w_bPrev2Kf_ = q_w_bPrevKf_;
+    t_w_bPrev2Kf_ = t_w_bPrevKf_;
     q_w_bPrevKf_ = q_w_bCurrKf_;
     t_w_bPrevKf_ = t_w_bCurrKf_;
+
+    q_bPrev2Kf_bPrevKf_ = q_w_bPrev2Kf_.inverse() * q_w_bPrevKf_;
+    q_bPrev2Kf_bPrevKf_.normalize();
+    t_bPrev2Kf_bPrevKf_ = q_w_bPrev2Kf_.inverse() * (t_w_bPrevKf_ - t_w_bPrev2Kf_);
+    // used for velocity estimation
 
     posePrevKf_ = poseCurrKf_;
     velPrevKf_ = velCurrKf_;
@@ -2274,6 +2371,7 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
 
             timeLogger_.start("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
             Eigen::DiagonalMatrix<double, Eigen::Dynamic> D; // Jacobian Scaling Matrix
+            Eigen::VectorXd dj;  // scaling factor for each column
             if (config_.turn_on_jacobian_column_scaling_qp_active_set)
             {
                 // bounds/constraints scaled on the step x 
@@ -2291,7 +2389,8 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 const double eps   = 1e-12;    // avoid division by zero
                 const double dmin  = 1e-5;     // clamp factors to avoid extreme scaling
                 const double dmax  = 1e+5;
-                Eigen::VectorXd dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column
+                // Eigen::VectorXd dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column
+                dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column, eps: caring for numerical stability
                 dj = dj.cwiseMax(dmin).cwiseMin(dmax);
                 // construct a column-scaling matrix D, where diagonal elements are dj
                 D = dj.asDiagonal();
@@ -2308,7 +2407,7 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 // ub_z = ub_x.cwiseProduct(d_inv);
                 // }
                 // // If you have general linear constraints on x: Acon * x in [Alb_x, Aub_x]
-                // // convert to z: (Acon * D) * z ∈ [Alb_x, Aub_x]
+                // // convert to z: (Acon * D) * z in [Alb_x, Aub_x]
                 // Eigen::MatrixXd Acon_z;
                 // if (Acon.size() > 0) Acon_z = Acon * D;
 
@@ -2410,29 +2509,66 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             Eigen::VectorXd xQP(6); // solution vector (roll, pitch, yaw, tx, ty, tz)
 
             // scaler inequality constraints
-            // Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
-            // Eigen::VectorXd ub(6);
-            Eigen::VectorXd lb = Eigen::VectorXd(); // let's put lb ub default (no constraints)
-            Eigen::VectorXd ub = Eigen::VectorXd();
+            Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
+            Eigen::VectorXd ub(6);
+            if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints)
+            {
+                timeLogger_.start("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
+                // linear velocity from the 2nd previous frame to the previous frame, expressed in the body at the 2nd previous frame
+                const double linVel = t_bPrev2Kf_bPrevKf_.x() / (timePrevScanEnd_ - timePrev2ScanEnd_);
 
-            // setup the scaler constraints
-            const double vel = 
-                std::sqrt((t_w_bCurrKf_.x()-t_w_bPrevKf_.x())*(t_w_bCurrKf_.x()-t_w_bPrevKf_.x()) 
-                    + (t_w_bCurrKf_.y()-t_w_bPrevKf_.y())*(t_w_bCurrKf_.y()-t_w_bPrevKf_.y())) / (timeCurrScanEnd_ - timeCurrScanBeg_);
-            const double maxStrAng = 40 * (M_PI/180);   // [rad]
-            const double minStrAng = -40 * (M_PI/180);  // [rad]
-            const double whlbase = 2.3; // [m]
-            double maxYawRate = vel * std::tan(maxStrAng) / whlbase;
-            double minYawRate = vel * std::tan(minStrAng) / whlbase;
+                const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
+                // const double minStrAng = config_.vehicle_kinematic_constraints_min_steering_angle * (M_PI/180);  // [rad]
+                const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
+                double maxYawRate = linVel * std::tan(maxStrAng) / whlbase;
+                // double minYawRate = linVel.x() * std::tan(-maxStrAng) / whlbase;
+                if (linVel < 0) maxYawRate *= -1;
+                double minYawRate = - maxYawRate;
 
-            // let's try no constraints first
-            // for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
-            // {
-            //     lb(i) = - std::numeric_limits<double>::max();
-            //     ub(i) = std::numeric_limits<double>::max();
-            // }
-            // lb(2) = minYawRate; // let's try no constraints first
-            // ub(2) = maxYawRate;
+                RCLCPP_INFO_STREAM(get_logger(), "forward linear velocity: " << linVel << " [m/s]");
+                RCLCPP_INFO_STREAM(get_logger(), "max yaw rate: " << maxYawRate * (180/M_PI) << " [deg/s]");
+                RCLCPP_INFO_STREAM(get_logger(), "min yaw rate: " << minYawRate * (180/M_PI) << " [deg/s]");
+
+                // !!! We have to impose constraints on AXIS-ANGLE VECTOR (alpha, beta, gamma) not really (roll, pitch, yaw) !!!
+                // But we can approximate delta_yaw in body frame with the z element of the axis-angle vector
+                // A concrete way is axis-angle vector -> rotation matrix -> Euler angle (yaw)
+                //  and we can linearize the constraint by using Jacobian of Euler angle (yaw) wrt axis-angle vector
+                //  axis-angle vector always starts from identity in body frame(the previous body pose)
+                //  in that case Jacobian of Euler angle (yaw) wrt axis-angle vector is identity
+                //   since the right Jacobian evaluated at the identity (Jr(0)) is identity.
+                //  We can use this approximation because typically it would be a small rotation between scans.
+                //  Thus, we can typically approximate delta_yaw in body frame with the z element of the axis-angle vector
+                //  One potential failure is that if the body z-axis does not align with the true yaw axis, the approximation would not hold
+                //  In that case, we need to perform and update a ground plane normal estimation and update body z-axis according to it.
+
+                for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
+                {
+                    lb(i) = - std::numeric_limits<double>::max();
+                    ub(i) = std::numeric_limits<double>::max();
+                }
+                // put yaw rate constraints only on z-component of axis-angle representation
+                lb(2) = minYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);    // need to scale actually
+                ub(2) = maxYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
+
+                // if using column-wise Jacobian scaling for numerical stability, we also have to scale the constraint
+                if(config_.turn_on_jacobian_column_scaling_qp_active_set)
+                {
+                    Eigen::VectorXd d_inv = dj.cwiseInverse();
+                    lb = lb.cwiseProduct(d_inv);
+                    ub = ub.cwiseProduct(d_inv);
+                }
+
+                RCLCPP_INFO_STREAM(get_logger(), "lb(2): " << lb(2));
+                RCLCPP_INFO_STREAM(get_logger(), "ub(2): " << ub(2));
+
+                timeLogger_.stop("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
+            }
+            else 
+            {
+                // no constraints
+                lb = Eigen::VectorXd(); 
+                ub = Eigen::VectorXd();
+            }
 
             // linear inequality constraint (We don't enforce linear constraint for now)
             Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd();
@@ -2503,22 +2639,25 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
 
             if (debug_print_qp_active_set_solution_analysis)
             {
-                RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
-                RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
-                if (constraintMatrix.size() == 0) 
+                if (dual.size() > 0)
                 {
-                    RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
-                } 
-                else if (constraintMatrix.cols() != xQP.size()) 
-                {
-                    RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
-                } 
-                else 
-                {
-                    RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * xQP).transpose());
+                    RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
+                    RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
+                    if (constraintMatrix.size() == 0) 
+                    {
+                        RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
+                    } 
+                    else if (constraintMatrix.cols() != xQP.size()) 
+                    {
+                        RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
+                    } 
+                    else 
+                    {
+                        RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * xQP).transpose());
+                    }
+                    // std::cout << constraintMatrix*xQP << std::endl;
+                    // RCLCPP_INFO_STREAM(get_logger(), constraintMatrix*xQP);
                 }
-                // std::cout << constraintMatrix*xQP << std::endl;
-                // RCLCPP_INFO_STREAM(get_logger(), constraintMatrix*xQP);
             }
 
             // scale the solution back if necessary
@@ -2561,14 +2700,19 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
             Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
 
-            if (config_.pose_increment_multiplication == "left")
-            {
-                T = exp_x * T; // update by left multiplication
-            }
-            else 
+            if (config_.pose_increment_multiplication == "right")
             {
                 T = T * exp_x; // update by right multiplication
             }
+            else if (config_.pose_increment_multiplication == "left")
+            {
+                T = exp_x * T; // update by left multiplication
+            }
+            else
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
+            }
+
             q_w_bCurrKf_ = Eigen::Quaterniond(T.rotationMatrix());
             q_w_bCurrKf_.normalize();
             t_w_bCurrKf_ = T.translation();
@@ -2645,7 +2789,5 @@ void Frontend::computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen:
         w(i) = wi;
     }
 }
-
-
 
 } // namespace lo_dev

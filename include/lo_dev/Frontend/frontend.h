@@ -46,6 +46,9 @@
 
 // qpmad InEqualityConstrained Opt. Module
 #include <qpmad/solver.h>
+#include <sophus/se3.hpp>
+#include <sophus/so3.hpp>
+
 
 namespace lo_dev 
 {
@@ -101,9 +104,12 @@ struct Config_Frontend
     // bool  use_imu_roll_pitch;
     double lag; 
     bool use_lo_prior_factor_wo_between_factor; 
+    std::string initial_guess_source;
+    std::string motion_compensation_source;
 
     // ---- for inequality constraints ---- 
     bool turn_on_qp_ineq_constraints_active_set;
+    bool turn_on_ineq_constraints;
     int sqp_iteration_num_qp_active_set;
     bool turn_on_levenberg_marquardt_qp_active_set;
     double levenberg_marquardt_lambda_qp_active_set;
@@ -115,6 +121,10 @@ struct Config_Frontend
     std::string pose_increment_multiplication;
     bool turn_on_Sophus_SE3_update;
     std::string qp_active_set_Hessian_computation;
+
+    double vehicle_kinematic_constraints_max_steering_angle;
+    double vehicle_kinematic_constraints_min_steering_angle;
+    double vehicle_kinematic_constraints_wheel_base;
 };
 
 
@@ -185,14 +195,18 @@ private:
     VoxelHashMap voxelMap_;
 
     // pose(transformation) variables
-    Eigen::Quaterniond q_w_bPrevKf_;    // imu pose(rotation) w.r.t. world at the previous keyframe(previous scan)
-    Eigen::Vector3d t_w_bPrevKf_;       // imu pose(translation) w.r.t. world at the previous keyframe(previous scan)
     Eigen::Quaterniond q_w_bCurrKf_;    // imu pose(rotation) w.r.t. world at the current keyframe(current scan)
     Eigen::Vector3d t_w_bCurrKf_;       // imu pose(translation) w.r.t. world at the current keyframe(current scan)
+    Eigen::Quaterniond q_w_bPrevKf_;    // imu pose(rotation) w.r.t. world at the previous keyframe(previous scan)
+    Eigen::Vector3d t_w_bPrevKf_;       // imu pose(translation) w.r.t. world at the previous keyframe(previous scan)
+    Eigen::Quaterniond q_w_bPrev2Kf_;    // imu pose(rotation) w.r.t. world at the keyframe 2 frames before
+    Eigen::Vector3d t_w_bPrev2Kf_;       // imu pose(translation) w.r.t. world at the keyframe 2 frames before
     Eigen::Quaterniond q_bPrevKf_bCurrKf_lo_; 
     Eigen::Vector3d t_bPrevKf_bCurrKf_lo_;
     Eigen::Quaterniond q_bPrevKf_bCurrKf_initGuess_;
     Eigen::Vector3d t_bPrevKf_bCurrKf_initGuess_;  
+    Eigen::Quaterniond q_bPrev2Kf_bPrevKf_; 
+    Eigen::Vector3d t_bPrev2Kf_bPrevKf_;
     // naming rule for transformation
     // q: rotation(quaternion)
     // t: translation
@@ -219,10 +233,11 @@ private:
     std::deque<sensor_msgs::msg::Imu> imuMsgBuffer_;
     std::deque<sensor_msgs::msg::PointCloud2> cloudMsgBuffer_;
     bool isImuInitialized_;
-    bool isCloudMapInitialized_;       
-    double timePrevScanEnd_;
+    bool isCloudMapInitialized_;   
     double timeCurrScanBeg_;
-    double timeCurrScanEnd_;
+    double timeCurrScanEnd_;    
+    double timePrevScanEnd_; 
+    double timePrev2ScanEnd_;
     std::shared_ptr<gtsam::PreintegratedImuMeasurements> imuPropagator_;
     std::map<double, gtsam::NavState> imuPoseTimeline_;
     bool isImuFirstPropagation_;

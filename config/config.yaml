@@ -64,6 +64,9 @@
         use_liosam_gauss_newton: false
         use_fastlio_point_plane_residual_param: true    # default: true
         build_local_map_from_all_global_map: false
+        initial_guess_source: "imu"         # "imu" or "constant velocity"
+        motion_compensation_source: "imu"   # "imu" or "constant velocity"
+        
         
         # ---- for factor graph ----
         turn_on_factor_graph: false 
@@ -74,10 +77,11 @@
         gyr_w: 3.5640318696367613e-05       # gyroscope bias random work noise standard deviation.     #4.0e-5
         g_norm: 9.80511    # 0 means you need to provide both imu-camera and laser-camera extrinsic
         lag: 1.0
-        use_lo_prior_factor_wo_between_factor: false
+        use_lo_prior_factor_wo_between_factor: true
 
         # ---- for inequality constraints ----
         turn_on_qp_ineq_constraints_active_set: true
+        turn_on_ineq_constraints: true
         sqp_iteration_num_qp_active_set: 5
         turn_on_levenberg_marquardt_qp_active_set: true   # true: LM method, false: Gauss Netwon
         levenberg_marquardt_lambda_qp_active_set: 1.0
@@ -85,11 +89,15 @@
         turn_on_robust_kernel_qp_active_set: true
         turn_on_mad_based_scaling_for_kernel_weights_qp_active_set: true
         robust_kernel_qp_active_set: "Huber"
-        turn_on_jacobian_column_scaling_qp_active_set: false
+        turn_on_jacobian_column_scaling_qp_active_set: true
         pose_increment_multiplication: "right"  # "right": right Jacobian, "left": left Jacobian
         turn_on_Sophus_SE3_update: false
         qp_active_set_Hessian_computation: "for_loop" # "matrix_multiplication" or "for_loop"
         
+        vehicle_kinematic_constraints:
+            max_steering_angle:  40.0   # [deg]
+            # min_steering_angle: -40.0   # [deg]
+            wheel_base: 2.709   # [m]
 
     debug:
         print_imu_forward_propagation_state: false
@@ -121,7 +129,7 @@
         print_qp_active_set_init_guess: false
         print_qp_active_set_matrices_jacobian_residual: false   # can be too many printed lines
         print_qp_active_set_matrices: false
-        print_qp_active_set_solution_analysis: false
+        print_qp_active_set_solution_analysis: true
         print_qp_active_set_solution: false
         print_qp_active_set_solution_pose_update: false
         print_qp_icp_iter_num: false
