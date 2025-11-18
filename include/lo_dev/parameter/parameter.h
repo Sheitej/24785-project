@@ -46,6 +46,7 @@ enum class SensorType
     LIVOX
 };
 
+
 extern std::string IMU_TOPIC;
 extern std::string LIDAR_TOPIC;
 extern std::string ODOM_TOPIC;
@@ -78,8 +79,11 @@ extern float IMU_ACC_Z_LIMIT;
 extern std::string SENSOR; 
 extern SensorType sensor;
 
+extern double TIME_EPS;
+
 
 // for debugging 
+extern bool debug_print_lines_in_run;
 extern bool debug_print_imu_forward_propagation_state;
 extern bool debug_print_get_imu_pose_at_measurement_time;
 extern bool debug_print_imu_pose_timeline;
@@ -94,6 +98,7 @@ extern bool debug_print_cloud_map_size;
 extern bool debug_print_keyframe_id;
 extern bool debug_print_lo_relative_pose_fg;
 extern bool debug_print_PreintegratedImuMeasurements_fg;
+extern bool debug_print_fg_imuIntegrator_right_after_imu_propagation;
 extern bool debug_print_imu_factor_fg;
 extern bool debug_print_imu_bias_factor_fg;
 extern bool debug_print_lo_factor_fg;
@@ -104,6 +109,8 @@ extern bool debug_print_key_timestamp_in_window;
 extern bool debug_print_num_factors_values;
 extern bool debug_print_num_downsampled_point;
 extern bool debug_print_num_point_in_voxel_map;
+extern bool debug_print_scan_time_sync;
+extern bool debug_print_point_cloud_msg_header_timestamp;
 extern bool debug_dump_log_file_voxel_ids;
 extern bool debug_print_qp_active_set;
 extern bool debug_print_qp_active_set_init_guess;

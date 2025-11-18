@@ -55,7 +55,7 @@ namespace lo_dev
 
 using gtsam::symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
 using gtsam::symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
-using gtsam::symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
+using gtsam::symbol_shorthand::X; // Pose3 (x,y,z,r,p,y) should be 'P'
 
 struct Config_Frontend
 {
@@ -86,6 +86,8 @@ struct Config_Frontend
     float imu_gyr_bias_noise;
     float imu_gravity;
     bool enable_min_range_filter;
+    double lidar_scan_rate;
+    std::string point_cloud_msg_timestamp;
 
     // ---- for lidar odometry ---- 
     int max_iterations;
@@ -96,6 +98,8 @@ struct Config_Frontend
     bool use_liosam_gauss_newton;
     bool use_fastlio_point_plane_residual_param;
     bool build_local_map_from_all_global_map;
+    std::string initial_guess_source;
+    std::string motion_compensation_source;
 
     // ---- for factor graph----
     bool turn_on_factor_graph;
@@ -104,8 +108,7 @@ struct Config_Frontend
     // bool  use_imu_roll_pitch;
     double lag; 
     bool use_lo_prior_factor_wo_between_factor; 
-    std::string initial_guess_source;
-    std::string motion_compensation_source;
+    std::string factor_graph_init_guess_source;
 
     // ---- for inequality constraints ---- 
     bool turn_on_qp_ineq_constraints_active_set;
@@ -146,17 +149,17 @@ public:
     void imuHandler(const sensor_msgs::msg::Imu::SharedPtr msgIn);
     void cloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msgIn);
     void initializeImu();
-    void synchronizeMeasurements();
+    bool synchronizeMeasurements();
     void convertCloudMsgToPcl(const sensor_msgs::msg::PointCloud2& msgIn, pcl::PointCloud<PointType>::Ptr cloudOut);
     void propagateImu();
     void transformPointCloudInImuFrame();
     void getImuPoseAtPointMeasurementTime(double pointTime, Eigen::Quaterniond& qOut, Eigen::Vector3d& tOut);
-    void makeInitialGuess();
+    void makeInitialGuessLO();
     void deskewPointCloud();
 
     // ---- for lidar odometry ----
-    void initializeCloudMap();
-    void setInitialPose();
+    bool initializeCloudMap();
+    void setInitialPoseLO();
     void buildLocalMap();
     void downsampleCloud();
     void preparePointPlaneResidual();
@@ -170,17 +173,14 @@ public:
     void solveLeastSquares_InequalityConstraints_ActiveSet();
     void computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation);
 
-    // factor graph is commented out now (currently not implemented and might or might not be used in the future)
-    // // ---- for factor graph ---- 
-    void initializeFG();  // initial_system(double currentCorrectionTime, gtsam::Pose3 lidarPose) 
-    void resetSmoother();   // resetOptimization() in original
-    // void resetInitFlags();  // resetParams() in original
-    // void resetKeyframesPrior();  // reset_graph() in original
-    // bool readParameters();
-    // void initializeInterface();
-    // void integrateImu();
+    // ---- for factor graph ---- 
+    bool initializeFG();
+    void resetSmoother();
     void performFixedLagSmoothing();
+    void logRelativePoseEstimateEachSensor();
+    void logFactorGraphState();
 
+    void updateState();
 
 private:
     // ---- for general ---- 
@@ -190,6 +190,9 @@ private:
     std::deque<sensor_msgs::msg::Imu> imuMsgKfWindow_;
     pcl::PointCloud<PointType>::Ptr cloudKfWindow_;
     TimeLogger timeLogger_;
+    StateLogger stateLogger_;
+    ImuRawLogger imuRawLogger_;
+    FactorGraphLogger fgStateLogger_;
 
     // ---- for voxel map ---- 
     VoxelHashMap voxelMap_;
@@ -199,13 +202,11 @@ private:
     Eigen::Vector3d t_w_bCurrKf_;       // imu pose(translation) w.r.t. world at the current keyframe(current scan)
     Eigen::Quaterniond q_w_bPrevKf_;    // imu pose(rotation) w.r.t. world at the previous keyframe(previous scan)
     Eigen::Vector3d t_w_bPrevKf_;       // imu pose(translation) w.r.t. world at the previous keyframe(previous scan)
-    Eigen::Quaterniond q_w_bPrev2Kf_;    // imu pose(rotation) w.r.t. world at the keyframe 2 frames before
-    Eigen::Vector3d t_w_bPrev2Kf_;       // imu pose(translation) w.r.t. world at the keyframe 2 frames before
     Eigen::Quaterniond q_bPrevKf_bCurrKf_lo_; 
     Eigen::Vector3d t_bPrevKf_bCurrKf_lo_;
     Eigen::Quaterniond q_bPrevKf_bCurrKf_initGuess_;
     Eigen::Vector3d t_bPrevKf_bCurrKf_initGuess_;  
-    Eigen::Quaterniond q_bPrev2Kf_bPrevKf_; 
+    Eigen::Quaterniond q_bPrev2Kf_bPrevKf_;     // for constant velocity model used in deskewing and LO init guess
     Eigen::Vector3d t_bPrev2Kf_bPrevKf_;
     // naming rule for transformation
     // q: rotation(quaternion)
@@ -234,13 +235,15 @@ private:
     std::deque<sensor_msgs::msg::PointCloud2> cloudMsgBuffer_;
     bool isImuInitialized_;
     bool isCloudMapInitialized_;   
+    bool isStateInitialized_;   
+    bool isCurrFrameLidarOnlyEstimation_;   
     double timeCurrScanBeg_;
     double timeCurrScanEnd_;    
     double timePrevScanEnd_; 
     double timePrev2ScanEnd_;
     std::shared_ptr<gtsam::PreintegratedImuMeasurements> imuPropagator_;
     std::map<double, gtsam::NavState> imuPoseTimeline_;
-    bool isImuFirstPropagation_;
+    bool pointsTimestampAvailable_;
     Eigen::Vector3d meanAccInit_, meanGyrInit_;
     Eigen::Vector3d gravInit_;
 
@@ -260,22 +263,14 @@ private:
     std::vector<pcl::PointCloud<PointType>::Ptr> cloudFramesMapGlobal_; // surf_frames in LidarOdometry.cpp in Liliom
     int numResidual_ = 0;
     int numPtsNnFound_ = 0;
-    // pcl::PointCloud<PointType>::Ptr pointScanCurrForResidual_;
-    // pcl::PointCloud<PointType>::Ptr planeNormDistForResidual_;
-    // std::vector<Eigen::Vector3d> pointScanCurrForResidual_;
     std::vector<Eigen::Vector3d> pointScanCurrInBForResidual_;
     std::vector<Eigen::Vector3d> pointScanCurrInWForResidual_;
-    // std::vector<Eigen::Vector3d> planeNormDistForResidual_;
     std::vector<Eigen::Vector3d> planeNormalForResidual_;
-    // std::vector<double> pointPlaneDistForResidual_;
     std::vector<double> planeDistFromOriginForResidual_;
-    // int scan_match_cnt_ = 10; // num. of Icp iteration, which needed to be in config param
 
 
-    // ---- for factor graph ---- (currently not used and might or might not be used in the future)
-    // bool isSystemInited_; 
+    // ---- for factor graph ---- 
     bool isFGInitialized_; 
-    bool isFirstSmoothingDone_; 
     gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorVelNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorBiasNoise_;
@@ -288,17 +283,18 @@ private:
     std::shared_ptr<gtsam::BatchFixedLagSmoother> fixedLagSmoother_;
     gtsam::FixedLagSmoother::KeyTimestampMap keyTimestamps_;
     gtsam::Pose3 T_bPrevKf_bCurrKf_lo_;
-    gtsam::Pose3 posePrevKf_;
-    gtsam::Vector3 velPrevKf_;
     gtsam::imuBias::ConstantBias biasPrevKf_;
     gtsam::NavState statePrevKf_;
-    gtsam::Pose3 poseCurrKf_; 
-    gtsam::Vector3 velCurrKf_;
     gtsam::imuBias::ConstantBias biasCurrKf_;
     gtsam::NavState stateCurrKf_;
 
+    // for logging 
+    gtsam::imuBias::ConstantBias biasCurrKf_initGuess_;
+    gtsam::Pose3 posCurrKf_initGuess_;
+    gtsam::Velocity3 velCurrKf_initGuess_;
+
     // ---- for qp inequality constraints ---- 
-    bool velocity_ready_ = false; // for the first iteration, run unconsrained least squares(solveLeastSquares()) to set timeScanBeg and timeScanCurr for velocity computation for ineq. constraints.
+    // bool velocity_ready_ = false; // for the first iteration, run unconsrained least squares(solveLeastSquares()) to set timeScanBeg and timeScanCurr for velocity computation for ineq. constraints.
 
 };
 

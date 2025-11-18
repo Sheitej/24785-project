@@ -34,8 +34,10 @@ std::string SENSOR;
 
 SensorType sensor;
 
+extern double TIME_EPS = 0.0001;
 
 // for debugging 
+bool debug_print_lines_in_run;
 bool debug_print_imu_forward_propagation_state;
 bool debug_print_get_imu_pose_at_measurement_time;
 bool debug_print_imu_pose_timeline;
@@ -50,6 +52,7 @@ bool debug_print_cloud_map_size;
 bool debug_print_keyframe_id;
 bool debug_print_lo_relative_pose_fg;
 bool debug_print_PreintegratedImuMeasurements_fg;
+bool debug_print_fg_imuIntegrator_right_after_imu_propagation;
 bool debug_print_imu_factor_fg;
 bool debug_print_imu_bias_factor_fg;
 bool debug_print_lo_factor_fg;
@@ -60,6 +63,8 @@ bool debug_print_key_timestamp_in_window;
 bool debug_print_num_factors_values;
 bool debug_print_num_downsampled_point;
 bool debug_print_num_point_in_voxel_map;
+bool debug_print_scan_time_sync;
+bool debug_print_point_cloud_msg_header_timestamp;
 bool debug_dump_log_file_voxel_ids;
 bool debug_print_qp_active_set;
 bool debug_print_qp_active_set_init_guess;
@@ -193,6 +198,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
 
 
     // ---------- for debugging parameter ---------- 
+    node->declare_parameter<bool>("debug.print_lines_in_run", false);
     node->declare_parameter<bool>("debug.print_imu_forward_propagation_state", false);
     node->declare_parameter<bool>("debug.print_get_imu_pose_at_measurement_time", false);
     node->declare_parameter<bool>("debug.print_imu_pose_timeline", false);
@@ -207,6 +213,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.print_keyframe_id", false);
     node->declare_parameter<bool>("debug.print_lo_relative_pose_fg", false);
     node->declare_parameter<bool>("debug.print_PreintegratedImuMeasurements_fg", false);
+    node->declare_parameter<bool>("debug.print_fg_imuIntegrator_right_after_imu_propagation", false);
     node->declare_parameter<bool>("debug.print_imu_factor_fg", false);
     node->declare_parameter<bool>("debug.print_imu_bias_factor_fg", false);
     node->declare_parameter<bool>("debug.print_lo_factor_fg", false);
@@ -216,8 +223,10 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.print_key_timestamp_in_window", false);
     node->declare_parameter<bool>("debug.print_num_factors_values", false);
     node->declare_parameter<bool>("debug.print_num_downsampled_point", false);
-    node->declare_parameter<bool>("debug.debug_print_num_point_in_voxel_map", false);
-    node->declare_parameter<bool>("debug.debug_dump_log_file_voxel_ids", false);
+    node->declare_parameter<bool>("debug.print_num_point_in_voxel_map", false);
+    node->declare_parameter<bool>("debug.print_scan_time_sync", false);
+    node->declare_parameter<bool>("debug.print_point_cloud_msg_header_timestamp", false);
+    node->declare_parameter<bool>("debug.dump_log_file_voxel_ids", false);
     node->declare_parameter<bool>("debug.print_qp_active_set", false);
     node->declare_parameter<bool>("debug.print_qp_active_set_init_guess", false);
     node->declare_parameter<bool>("debug.print_qp_active_set_matrices", false);
@@ -230,6 +239,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.try_qp_active_set_Cholesky_Decomposition_unconstrained", false);
 
 
+    debug_print_lines_in_run = node->get_parameter("debug.print_lines_in_run").as_bool();
     debug_print_imu_forward_propagation_state = node->get_parameter("debug.print_imu_forward_propagation_state").as_bool();
     debug_print_get_imu_pose_at_measurement_time = node->get_parameter("debug.print_get_imu_pose_at_measurement_time").as_bool();
     debug_print_imu_pose_timeline = node->get_parameter("debug.print_imu_pose_timeline").as_bool();
@@ -244,6 +254,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_keyframe_id = node->get_parameter("debug.print_keyframe_id").as_bool();
     debug_print_lo_relative_pose_fg = node->get_parameter("debug.print_lo_relative_pose_fg").as_bool();
     debug_print_PreintegratedImuMeasurements_fg = node->get_parameter("debug.print_PreintegratedImuMeasurements_fg").as_bool();
+    debug_print_fg_imuIntegrator_right_after_imu_propagation = node->get_parameter("debug.print_fg_imuIntegrator_right_after_imu_propagation").as_bool();
     debug_print_imu_factor_fg = node->get_parameter("debug.print_imu_factor_fg").as_bool();
     debug_print_imu_bias_factor_fg = node->get_parameter("debug.print_imu_bias_factor_fg").as_bool();
     debug_print_lo_factor_fg = node->get_parameter("debug.print_lo_factor_fg").as_bool();
@@ -253,8 +264,10 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_key_timestamp_in_window = node->get_parameter("debug.print_key_timestamp_in_window").as_bool();
     debug_print_num_factors_values = node->get_parameter("debug.print_num_factors_values").as_bool();
     debug_print_num_downsampled_point = node->get_parameter("debug.print_num_downsampled_point").as_bool();
-    debug_print_num_point_in_voxel_map = node->get_parameter("debug.debug_print_num_point_in_voxel_map").as_bool();
-    debug_dump_log_file_voxel_ids = node->get_parameter("debug.debug_dump_log_file_voxel_ids").as_bool();
+    debug_print_num_point_in_voxel_map = node->get_parameter("debug.print_num_point_in_voxel_map").as_bool();
+    debug_print_scan_time_sync = node->get_parameter("debug.print_scan_time_sync").as_bool();
+    debug_print_point_cloud_msg_header_timestamp = node->get_parameter("debug.print_point_cloud_msg_header_timestamp").as_bool();
+    debug_dump_log_file_voxel_ids = node->get_parameter("debug.dump_log_file_voxel_ids").as_bool();
     debug_print_qp_active_set = node->get_parameter("debug.print_qp_active_set").as_bool();
     debug_print_qp_active_set_init_guess = node->get_parameter("debug.print_qp_active_set_init_guess").as_bool();
     debug_print_qp_active_set_matrices = node->get_parameter("debug.print_qp_active_set_matrices").as_bool();
@@ -266,6 +279,8 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_qp_sqp_iter_num = node->get_parameter("debug.print_qp_sqp_iter_num").as_bool();
     debug_try_qp_active_set_Cholesky_Decomposition_unconstrained = node->get_parameter("debug.try_qp_active_set_Cholesky_Decomposition_unconstrained").as_bool();
 
+
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lines_in_run " << debug_print_lines_in_run);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_forward_propagation_state " << debug_print_imu_forward_propagation_state);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_get_imu_pose_at_measurement_time " << debug_print_get_imu_pose_at_measurement_time);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_pose_timeline " << debug_print_imu_pose_timeline);
@@ -280,6 +295,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_keyframe_id" << debug_print_keyframe_id);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lo_relative_pose_fg" << debug_print_lo_relative_pose_fg);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_PreintegratedImuMeasurements_fg" << debug_print_PreintegratedImuMeasurements_fg);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_fg_imuIntegrator_right_after_imu_propagation" << debug_print_fg_imuIntegrator_right_after_imu_propagation);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_factor_fg" << debug_print_imu_factor_fg);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_imu_bias_factor_fg" << debug_print_imu_bias_factor_fg);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lo_factor_fg" << debug_print_lo_factor_fg);
@@ -290,6 +306,8 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_factors_values" << debug_print_num_factors_values);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_downsampled_point" << debug_print_num_downsampled_point);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_num_point_in_voxel_map" << debug_print_num_point_in_voxel_map);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_scan_time_sync" << debug_print_scan_time_sync);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_print_point_cloud_msg_header_timestamp" << debug_print_point_cloud_msg_header_timestamp);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.dump_log_file_voxel_ids" << debug_dump_log_file_voxel_ids);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_qp_active_set" << debug_print_qp_active_set);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_qp_active_set_init_guess" << debug_print_qp_active_set_init_guess);
