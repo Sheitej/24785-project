@@ -47,12 +47,12 @@ namespace lo_dev
 
 // copied from LidarKeyframeFactor in Liliom, which is used in ceres icp
 // This struct defines the residual and jacobian to be used in iterative non-linear optimization
-struct LidarPlaneNormIncreFactor 
+struct LidarPlaneNormIncreFactor_LeftMultiplying
 {
     static constexpr int NumResiduals() { return 1; } // added referring to ct-lio
 
     // Constructor
-    LidarPlaneNormIncreFactor(Eigen::Vector3d curr_point_,
+    LidarPlaneNormIncreFactor_LeftMultiplying(Eigen::Vector3d curr_point_,
                               Eigen::Vector3d plane_unit_norm_,
                               double negative_OA_dot_norm_): 
         curr_point(curr_point_),
@@ -61,8 +61,8 @@ struct LidarPlaneNormIncreFactor
 
     // operator() (= a functor) definition -> use ceres::AutomaticDiff
     template <typename T> bool operator()(const T *q, const T *t, T *residual) const {
-        Eigen::Quaternion<T> q_inc{q[0], q[1], q[2], q[3]}; // increment rot
-        // q_inc.normalize(); // added just in case // didn't do any good
+        Eigen::Quaternion<T> q_inc{q[0], q[1], q[2], q[3]}; // increment rot (actually absolute pose in this case)
+        // q_inc.normalize(); // added just in case // didn't do any good (actually absolute pose in this case)
         Eigen::Matrix<T, 3, 1> t_inc{t[0], t[1], t[2]};     // increment trans
         Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()), T(curr_point.z())}; // current point in the body frame
         Eigen::Matrix<T, 3, 1> point_w;     // point in the world (map)
@@ -89,7 +89,7 @@ struct LidarPlaneNormIncreFactor
     static ceres::CostFunction *Create(const Eigen::Vector3d curr_point_,
                                        const Eigen::Vector3d plane_unit_norm_,
                                        const double negative_OA_dot_norm_) {
-        return (new ceres::AutoDiffCostFunction<LidarPlaneNormIncreFactor, 1, 4, 3>(new LidarPlaneNormIncreFactor(curr_point_, plane_unit_norm_, negative_OA_dot_norm_)));
+        return (new ceres::AutoDiffCostFunction<LidarPlaneNormIncreFactor_LeftMultiplying, 1, 4, 3>(new LidarPlaneNormIncreFactor_LeftMultiplying(curr_point_, plane_unit_norm_, negative_OA_dot_norm_)));
     }
     // Example of ceres::AutoDiffCostFunction - http://ceres-solver.org/nnls_modeling.html#autodiffcostfunction
     // MyScalarCostFunctor functor(1.0)
@@ -113,6 +113,102 @@ struct LidarPlaneNormIncreFactor
     Eigen::Vector3d curr_point;
     Eigen::Vector3d plane_unit_norm;
     double negative_OA_dot_norm;
+};
+
+
+struct LidarPlaneNormIncreFactor_RightMultiplying
+{
+    static constexpr int NumResiduals() { return 1; } // added referring to ct-lio
+
+    // [TODO] should change the variable name '_' position
+
+    // Constructor
+    LidarPlaneNormIncreFactor_RightMultiplying(Eigen::Vector3d curr_point_,
+                              Eigen::Vector3d plane_unit_norm_,
+                              double negative_OA_dot_norm_,
+                              Eigen::Quaterniond q_lifting_point_,
+                              Eigen::Vector3d t_lifting_point_): 
+        curr_point(curr_point_),
+        plane_unit_norm(plane_unit_norm_),
+        negative_OA_dot_norm(negative_OA_dot_norm_),
+        q_lifting_point(q_lifting_point_),
+        t_lifting_point(t_lifting_point_) {}
+
+    // operator() (= a functor) definition -> use ceres::AutomaticDiff
+    template <typename T> bool operator()(const T *q, const T *t, T *residual) const {
+        Eigen::Quaternion<T> q_inc{q[0], q[1], q[2], q[3]}; // increment rot
+        // q_inc.normalize(); // added just in case // didn't do any good
+        Eigen::Matrix<T, 3, 1> t_inc{t[0], t[1], t[2]};     // increment trans
+        Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()), T(curr_point.z())}; // current point in the body frame
+        Eigen::Matrix<T, 3, 1> point_w;     // point in the world (map)
+
+        Eigen::Quaternion<T> q_lift{T(q_lifting_point.w()), T(q_lifting_point.x()), T(q_lifting_point.y()), T(q_lifting_point.z())};
+        Eigen::Matrix<T, 3, 1> t_lift{T(t_lifting_point.x()), T(t_lifting_point.y()), T(t_lifting_point.z())};
+
+        // Eigen::Matrix<T, 3, 1> t_curr = q_lifting_point * t_inc + t_lifting_point;
+        // Eigen::Quaternion<T> q_curr = (q_lifting_point * q_inc).normalized();
+        Eigen::Matrix<T, 3, 1> t_curr = q_lift * t_inc + t_lift;
+        Eigen::Quaternion<T> q_curr = (q_lift * q_inc).normalized();
+
+        // point_w = q_inc * cp + t_inc;       // Is this like transformation of point into the world coordinate already encoded in the cost function??
+        point_w = q_curr * cp + t_curr;       // Is this like transformation of point into the world coordinate already encoded in the cost function??
+
+        Eigen::Matrix<T, 3, 1> norm(T(plane_unit_norm.x()), T(plane_unit_norm.y()), T(plane_unit_norm.z()));    // plane normal
+
+        // Common point-to-plane residual
+        residual[0] = norm.dot(point_w) + T(negative_OA_dot_norm); // residual=(plane normal)*(point position vector in world)+(distance from the plane to the world origin)
+
+        // should be RCLCPP
+        // std::cout << __FUNCTION__ << __LINE__ << std::endl;
+        // std::cout << "q_inc: " << q_inc.coeffs().transpose() << std::endl;
+        // std::cout << "t_inc: " << t_inc.transpose() << std::endl;
+        // std::cout << "cp: " << cp << std::endl;
+        // std::cout << "q_inc: " << q_inc << std::endl;
+        // std::cout << "t_inc: " << t_inc << std::endl;
+        // std::cout << "point_w: " << point_w << std::endl;
+
+        return true;
+    }
+
+    // Function to create a ceres cost function
+    static ceres::CostFunction *Create(const Eigen::Vector3d curr_point_,
+                                       const Eigen::Vector3d plane_unit_norm_,
+                                       const double negative_OA_dot_norm_,
+                                       const Eigen::Quaterniond q_lifting_point_,
+                                       const Eigen::Vector3d t_lifting_point_) {
+                                    //    const Eigen::Matrix<double, 3, 1> t_lifting_point_) {
+        return (new ceres::AutoDiffCostFunction<LidarPlaneNormIncreFactor_RightMultiplying, 1, 4, 3>(new LidarPlaneNormIncreFactor_RightMultiplying(
+                                                                                                            curr_point_, 
+                                                                                                            plane_unit_norm_, 
+                                                                                                            negative_OA_dot_norm_,
+                                                                                                            q_lifting_point_,
+                                                                                                            t_lifting_point_)));
+    }
+    // Example of ceres::AutoDiffCostFunction - http://ceres-solver.org/nnls_modeling.html#autodiffcostfunction
+    // MyScalarCostFunctor functor(1.0)
+    // auto* cost_function = new AutoDiffCostFunction<MyScalarCostFunctor, 1, 2, 2>(&functor, DO_NOT_TAKE_OWNERSHIP);
+    // To get an auto differentiated cost function, you must define a class with a templated operator() (a functor) that computes the cost function in terms of the template parameter T.
+    // like:
+        // class MyScalarCostFunctor {
+        // MyScalarCostFunctor(double k): k_(k) {}
+
+        // template <typename T>
+        // bool operator()(const T* const x , const T* const y, T* e) const {
+        //     e[0] = k_ - x[0] * y[0] - x[1] * y[1];
+        //     return true;
+        // }
+
+        // private:
+        // double k_;
+        // };
+    // functor: bool operator() should take (const T* const x , const T* const y, T* e) where e is the residual
+
+    Eigen::Vector3d curr_point;
+    Eigen::Vector3d plane_unit_norm;
+    double negative_OA_dot_norm;
+    Eigen::Quaterniond q_lifting_point;
+    Eigen::Vector3d t_lifting_point;
+    // Eigen::Matrix<double, 3, 1> t_lifting_point;
 };
 
 

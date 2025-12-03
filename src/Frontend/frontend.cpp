@@ -1,18 +1,34 @@
 #include <lo_dev/Frontend/frontend.h>
 
-
-//  - should maintain dtPrev2Scan,dtPrevScan,dtCurrScan 
+// TODO left:
 //  - deskewpointcloud() can be multi-threaded by replacing push_back
+//  - all the pose should be GTSAM::Pose3 for consistency throughout the code
 
-// [TODO]   should keep only NavStatePrevKf/CurrKf and bias as gtsam state since pose and vel are redundant (they're already included in NavState)
 
-// [TODO] all the pose should be GTSAM::Pose3 for consistency throughout the code
+// novelty:
+//  we are focusing on improving lidar icp using other sensors, as one module of our odometry in sensor fusion module (i.e., factor graph)
+//  common approach: fuse lidar(degenerated) + imu + vision in factor graph, tuning covariance matrix(weight)
+//  our approach: if lidar is degenerated, get lidar odom improved as much as possible using inequality constraints, getting a reasonable local minima in icp
+//                 -> then fuse them in factor graph or anything
+//                 -> also, we can use vision ekf
 
-// - cleaning up code
-// - make it consistent in using statePrevKf_ or stateCurrKf_ for velocity and pose handling in GTSAM
-// - implement gtsam state log function
-// - check what's happening to the first imu estimation
-// - we can record all the estimation including lidar-only estimation round
+
+// Issue:
+//  QP formulation fails with factor graph for some reason because of a lack of control on step size (probably)
+
+
+// Current Observation:
+//  - Imu noise parameters and lidar noise parameters are really important
+
+
+// [TODO]
+//  - comment out all the print out
+//  - put icp iteration more (~20?)
+//  try to remove pointcloud loading failure "Failed to find match for field 'range'"
+//  - log inequality constraint activated time
+//  - check the vehicle used in HeLiPR
+//  - make the robot position bigger in rviz
+
 
 namespace lo_dev
 {    
@@ -24,9 +40,12 @@ Frontend::Frontend(const rclcpp::NodeOptions & options):Node("frontend_node", op
 bool Frontend::readParameters()
 {
     // ---- parameters for general ---- 
-    this->declare_parameter<bool>("frontend_node.set_main_process_timer", false);
+    this->declare_parameter<bool>("frontend_node.set_main_process_timer", true);
+    this->declare_parameter<bool>("frontend_node.turn_off_pcl_conversion_error_printing", false);
     config_.set_main_process_timer = this->get_parameter("frontend_node.set_main_process_timer").as_bool();
+    config_.turn_off_pcl_conversion_error_printing = this->get_parameter("frontend_node.turn_off_pcl_conversion_error_printing").as_bool();
     RCLCPP_INFO_STREAM(get_logger(), "set_main_process_timer: " << config_.set_main_process_timer);
+    RCLCPP_INFO_STREAM(get_logger(), "turn_off_pcl_conversion_error_printing: " << config_.turn_off_pcl_conversion_error_printing);
 
     // ---- parameters for voxel map ---- 
     this->declare_parameter<bool>("frontend_node.use_voxel_map", false);
@@ -69,6 +88,7 @@ bool Frontend::readParameters()
     this->declare_parameter<bool>("frontend_node.enable_min_range_filter", true);
     this->declare_parameter<double>("frontend_node.lidar_scan_rate", 100.0);
     this->declare_parameter<std::string>("frontend_node.point_cloud_msg_timestamp", "scan_end_time");
+    this->declare_parameter<bool>("frontend_node.print_sync_status", true);
 
     config_.imu_acc_noise = this->get_parameter("frontend_node.acc_n").as_double();
     config_.imu_acc_bias_noise = this->get_parameter("frontend_node.acc_w").as_double();
@@ -83,6 +103,7 @@ bool Frontend::readParameters()
     config_.enable_min_range_filter = this->get_parameter("frontend_node.enable_min_range_filter").as_bool();
     config_.lidar_scan_rate = this->get_parameter("frontend_node.lidar_scan_rate").as_double();
     config_.point_cloud_msg_timestamp = this->get_parameter("frontend_node.point_cloud_msg_timestamp").as_string();
+    config_.print_sync_status = this->get_parameter("frontend_node.print_sync_status").as_bool();
 
     if (SENSOR == "livox") 
     {
@@ -112,6 +133,7 @@ bool Frontend::readParameters()
     RCLCPP_INFO_STREAM(this->get_logger(), "enable_min_range_filter: " << config_.enable_min_range_filter);
     RCLCPP_INFO_STREAM(this->get_logger(), "lidar_scan_rate: " << config_.lidar_scan_rate);
     RCLCPP_INFO_STREAM(this->get_logger(), "point_cloud_msg_timestamp: " << config_.point_cloud_msg_timestamp);
+    RCLCPP_INFO_STREAM(this->get_logger(), "print_sync_status: " << config_.print_sync_status);
 
 
 
@@ -157,24 +179,32 @@ bool Frontend::readParameters()
     this->declare_parameter<double>("frontend_node.fixed_lag", 2.0);
     this->declare_parameter<bool>("frontend_node.use_lo_prior_factor_wo_between_factor", true);
     this->declare_parameter<std::string>("frontend_node.factor_graph_init_guess_source", "lidar");
+    this->declare_parameter<std::string>("frontend_node.fixed_lag_smoother_batch_or_incremental", "batch");
+    this->declare_parameter<bool>("frontend_node.fix_lidar_odom_covariance", false);
 
     config_.turn_on_factor_graph = this->get_parameter("frontend_node.turn_on_factor_graph").as_bool();
     config_.lidar_correction_noise = this->get_parameter("frontend_node.lidar_correction_noise").as_double();
     config_.smooth_factor = this->get_parameter("frontend_node.smooth_factor").as_double();
-    config_.lag = this->get_parameter("frontend_node.fixed_lag").as_double();
+    config_.fixed_lag = this->get_parameter("frontend_node.fixed_lag").as_double();
     config_.use_lo_prior_factor_wo_between_factor = this->get_parameter("frontend_node.use_lo_prior_factor_wo_between_factor").as_bool();
     config_.factor_graph_init_guess_source = this->get_parameter("frontend_node.factor_graph_init_guess_source").as_string();
+    config_.fixed_lag_smoother_batch_or_incremental = this->get_parameter("frontend_node.fixed_lag_smoother_batch_or_incremental").as_string();
+    config_.fix_lidar_odom_covariance = this->get_parameter("frontend_node.fix_lidar_odom_covariance").as_bool();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_factor_graph: " << config_.turn_on_factor_graph);
     RCLCPP_INFO_STREAM(this->get_logger(), "lidar_correction_noise: " << config_.lidar_correction_noise);
     RCLCPP_INFO_STREAM(this->get_logger(), "smooth_factor: " << config_.smooth_factor);
-    RCLCPP_INFO_STREAM(this->get_logger(), "lag: " << config_.lag);
+    RCLCPP_INFO_STREAM(this->get_logger(), "fixed_lag: " << config_.fixed_lag);
     RCLCPP_INFO_STREAM(this->get_logger(), "use_lo_prior_factor_wo_between_factor: " << config_.use_lo_prior_factor_wo_between_factor);
     RCLCPP_INFO_STREAM(this->get_logger(), "factor_graph_init_guess_source: " << config_.factor_graph_init_guess_source);
+    RCLCPP_INFO_STREAM(this->get_logger(), "fixed_lag_smoother_batch_or_incremental: " << config_.fixed_lag_smoother_batch_or_incremental);
+    RCLCPP_INFO_STREAM(this->get_logger(), "fix_lidar_odom_covariance: " << config_.fix_lidar_odom_covariance);
+
 
     // ---- parameters for inequality constraints ---- 
     this->declare_parameter<bool>("frontend_node.turn_on_qp_ineq_constraints_active_set",false);
     this->declare_parameter<bool>("frontend_node.turn_on_ineq_constraints",false);
+    this->declare_parameter<std::string>("frontend_node.ineq_constraints_type", "curvature");
     this->declare_parameter<int>("frontend_node.sqp_iteration_num_qp_active_set", 10);
     this->declare_parameter<bool>("frontend_node.turn_on_levenberg_marquardt_qp_active_set", false);
     this->declare_parameter<double>("frontend_node.levenberg_marquardt_lambda_qp_active_set", 2.0);
@@ -189,9 +219,18 @@ bool Frontend::readParameters()
     this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.max_steering_angle", 0.0);
     this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.min_steering_angle", 0.0);
     this->declare_parameter<double>("frontend_node.vehicle_kinematic_constraints.wheel_base", 0.0);
+    this->declare_parameter<bool>("frontend_node.qp_compute_ineq_from_imu_cov", false);
+    this->declare_parameter<double>("frontend_node.qp_compute_ineq_from_imu_cov_sigma_coef", 0.01);
+    this->declare_parameter<bool>("frontend_node.levenberg_marquardt_trust_region_lambda_adjustment", true);
+    this->declare_parameter<double>("frontend_node.levenberg_marquardt_trust_region_lambda_min", 1e-3);
+    this->declare_parameter<double>("frontend_node.levenberg_marquardt_trust_region_step_quality_threshold", 0.5);
+    this->declare_parameter<bool>("frontend_node.bfgs_on_inequality_constraint", false);
+    this->declare_parameter<bool>("frontend_node.ifopt_on_inequality_constraint", false);
+    this->declare_parameter<std::string>("frontend_node.inequality_constraints_solver", "");
 
     config_.turn_on_qp_ineq_constraints_active_set = this->get_parameter("frontend_node.turn_on_qp_ineq_constraints_active_set").as_bool();
     config_.turn_on_ineq_constraints = this->get_parameter("frontend_node.turn_on_ineq_constraints").as_bool();
+    config_.ineq_constraints_type = this->get_parameter("frontend_node.ineq_constraints_type").as_string();
     config_.sqp_iteration_num_qp_active_set = this->get_parameter("frontend_node.sqp_iteration_num_qp_active_set").as_int();
     config_.turn_on_levenberg_marquardt_qp_active_set = this->get_parameter("frontend_node.turn_on_levenberg_marquardt_qp_active_set").as_bool();
     config_.levenberg_marquardt_lambda_qp_active_set = this->get_parameter("frontend_node.levenberg_marquardt_lambda_qp_active_set").as_double();
@@ -206,9 +245,18 @@ bool Frontend::readParameters()
     config_.vehicle_kinematic_constraints_max_steering_angle = this->get_parameter("frontend_node.vehicle_kinematic_constraints.max_steering_angle").as_double();
     config_.vehicle_kinematic_constraints_min_steering_angle = this->get_parameter("frontend_node.vehicle_kinematic_constraints.min_steering_angle").as_double();
     config_.vehicle_kinematic_constraints_wheel_base = this->get_parameter("frontend_node.vehicle_kinematic_constraints.wheel_base").as_double();
+    config_.qp_compute_ineq_from_imu_cov = this->get_parameter("frontend_node.qp_compute_ineq_from_imu_cov").as_bool();
+    config_.qp_compute_ineq_from_imu_cov_sigma_coef = this->get_parameter("frontend_node.qp_compute_ineq_from_imu_cov_sigma_coef").as_double();
+    config_.levenberg_marquardt_trust_region_lambda_adjustment = this->get_parameter("frontend_node.levenberg_marquardt_trust_region_lambda_adjustment").as_bool();
+    config_.levenberg_marquardt_trust_region_lambda_min = this->get_parameter("frontend_node.levenberg_marquardt_trust_region_lambda_min").as_double();
+    config_.levenberg_marquardt_trust_region_step_quality_threshold = this->get_parameter("frontend_node.levenberg_marquardt_trust_region_step_quality_threshold").as_double();
+    config_.bfgs_on_inequality_constraint = this->get_parameter("frontend_node.bfgs_on_inequality_constraint").as_bool();
+    config_.ifopt_on_inequality_constraint = this->get_parameter("frontend_node.ifopt_on_inequality_constraint").as_bool();
+    config_.inequality_constraints_solver = this->get_parameter("frontend_node.inequality_constraints_solver").as_string();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_qp_ineq_constraints_active_set: " << config_.turn_on_qp_ineq_constraints_active_set);
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_ineq_constraints: " << config_.turn_on_ineq_constraints);
+    RCLCPP_INFO_STREAM(this->get_logger(), "ineq_constraints_type: " << config_.ineq_constraints_type);
     RCLCPP_INFO_STREAM(this->get_logger(), "sqp_iteration_num: " << config_.sqp_iteration_num_qp_active_set);
     RCLCPP_INFO_STREAM(this->get_logger(), "turn_on_levenberg_marquardt: " << config_.turn_on_levenberg_marquardt_qp_active_set);
     RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_lambda: " << config_.levenberg_marquardt_lambda_qp_active_set);
@@ -223,6 +271,28 @@ bool Frontend::readParameters()
     RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints_max_steering_angle: " << config_.vehicle_kinematic_constraints_max_steering_angle);
     RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints.min_steering_angle: " << config_.vehicle_kinematic_constraints_min_steering_angle);
     RCLCPP_INFO_STREAM(this->get_logger(), "vehicle_kinematic_constraints.wheel_base: " << config_.vehicle_kinematic_constraints_wheel_base);
+    RCLCPP_INFO_STREAM(this->get_logger(), "qp_compute_ineq_from_imu_cov: " << config_.qp_compute_ineq_from_imu_cov);
+    RCLCPP_INFO_STREAM(this->get_logger(), "qp_compute_ineq_from_imu_cov_sigma_coef: " << config_.qp_compute_ineq_from_imu_cov_sigma_coef);
+    RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_trust_region_lambda_adjustment: " << config_.levenberg_marquardt_trust_region_lambda_adjustment);
+    RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_trust_region_lambda_min: " << config_.levenberg_marquardt_trust_region_lambda_min);
+    RCLCPP_INFO_STREAM(this->get_logger(), "levenberg_marquardt_trust_region_step_quality_threshold: " << config_.levenberg_marquardt_trust_region_step_quality_threshold);
+    RCLCPP_INFO_STREAM(this->get_logger(), "bfgs_on_inequality_constraint: " << config_.bfgs_on_inequality_constraint);
+    RCLCPP_INFO_STREAM(this->get_logger(), "ifopt_on_inequality_constraint: " << config_.ifopt_on_inequality_constraint);
+    RCLCPP_INFO_STREAM(this->get_logger(), "inequality_constraints_solver: " << config_.inequality_constraints_solver);
+
+
+    // ---- for ekf imu propagation ---- 
+    this->declare_parameter<bool>("frontend_node.ekf_imu_covariance_prop_on",false);
+    this->declare_parameter<bool>("frontend_node.ekf_use_const_prior_cov",false);
+    this->declare_parameter<double>("frontend_node.ekf_const_diagonal_elem_prior_cov",0.01);
+
+    config_.ekf_imu_covariance_prop_on = this->get_parameter("frontend_node.ekf_imu_covariance_prop_on").as_bool();
+    config_.ekf_use_const_prior_cov = this->get_parameter("frontend_node.ekf_use_const_prior_cov").as_bool();
+    config_.ekf_const_diagonal_elem_prior_cov = this->get_parameter("frontend_node.ekf_const_diagonal_elem_prior_cov").as_double();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "ekf_imu_covariance_prop_on: " << config_.ekf_imu_covariance_prop_on);
+    RCLCPP_INFO_STREAM(this->get_logger(), "ekf_use_const_prior_cov: " << config_.ekf_use_const_prior_cov);
+    RCLCPP_INFO_STREAM(this->get_logger(), "ekf_const_diagonal_elem_prior_cov: " << config_.ekf_const_diagonal_elem_prior_cov);
 
     return true;
 }
@@ -307,8 +377,8 @@ void Frontend::initializeInterface()
 
 
     // initialize point cloud and odometry(estimated pose) publisher
-    pubCloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(ProjectName+"/kf/cloud/world/posterior", 2);
-    pubOdom_ = this->create_publisher<nav_msgs::msg::Odometry>(ProjectName+"/kf/odom/world/posterior", 10); // for odometry evaluation
+    pubCloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(ProjectName+"/result/pointcloud", 2);
+    pubOdom_ = this->create_publisher<nav_msgs::msg::Odometry>(ProjectName+"/result/odometry", 10); // for odometry evaluation
 
     // initialize ROS2 transform broadcaster just for Rviz visualization
     rclcpp::TimeSource ts(shared_from_this());
@@ -333,11 +403,15 @@ void Frontend::initializeInterface()
 
     // initialize imu propagator(integrator)
     std::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(config_.imu_gravity);
-    p->accelerometerCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_acc_noise,2); // acc white noise in continuous
-    p->gyroscopeCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_gyr_noise,2); // gyro white noise in continuous
-    p->integrationCovariance=gtsam::Matrix33::Identity(3,3)*pow(1e-4,2); // error committed in integrating position from velocities
+    // p->accelerometerCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_acc_noise,2); // acc white noise in continuous
+    // p->gyroscopeCovariance=gtsam::Matrix33::Identity(3,3)*pow(config_.imu_gyr_noise,2); // gyro white noise in continuous
+    // p->integrationCovariance=gtsam::Matrix33::Identity(3,3)*pow(1e-4,2); // error committed in integrating position from velocities
+    p->accelerometerCovariance=gtsam::Matrix33::Identity(3,3)*1e-2; 
+    p->gyroscopeCovariance=gtsam::Matrix33::Identity(3,3)*1e-2;
+    p->integrationCovariance=gtsam::Matrix33::Identity(3,3)*1e-2;
     gtsam::imuBias::ConstantBias prior_imu_bias((gtsam::Vector(6) << 0,0,0,0,0,0).finished());
     imuPropagator_=std::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias);
+    // is there any parameter left for preintegration parameter?
 
     // initialize point cloud container
     cloudKfWindow_.reset(new pcl::PointCloud<PointType>());
@@ -364,6 +438,9 @@ void Frontend::initializeInterface()
     t_bPrev2Kf_bPrevKf_ = Eigen::Vector3d::Zero();
 
     T_bPrevKf_bCurrKf_lo_ = gtsam::Pose3();
+    T_w_bCurrKf_lo_ = gtsam::Pose3();
+    T_bPrevKf_bCurrKf_imu_log_ = gtsam::Pose3();
+
     statePrevKf_ = gtsam::NavState();
     stateCurrKf_ = gtsam::NavState();
 
@@ -372,15 +449,61 @@ void Frontend::initializeInterface()
     priorPoseNoise_ = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2,1e-2,1e-2,1e-2,1e-2,1e-2).finished()); // rad,rad,rad,m,m,m,should be a config parameter
     priorVelNoise_ = gtsam::noiseModel::Isotropic::Sigma(3,1e-2);                      // m/s , should be a config parameter
     priorBiasNoise_ = gtsam::noiseModel::Isotropic::Sigma(6,1e-3);                    // 1e-2 ~ 1e-3 seems to be good, should be a config parameter
-    correctionNoise_ = gtsam::noiseModel::Isotropic::Sigma(6, config_.lidar_correction_noise); // meter
+    // priorBiasNoise_ = gtsam::noiseModel::Isotropic::Sigma(6,1e-2);                    // 1e-2 ~ 1e-3 seems to be good, should be a config parameter
+    // priorBiasNoise_ = gtsam::noiseModel::Isotropic::Sigma(6,1e-1);                    // 1e-2 ~ 1e-3 seems to be good, should be a config parameter
+    constLidarOdomNoise_ = gtsam::noiseModel::Isotropic::Sigma(6, config_.lidar_correction_noise); // meter
     noiseModelBetweenBias_ = (gtsam::Vector(6)
             << config_.imu_acc_bias_noise,config_.imu_acc_bias_noise,config_.imu_acc_bias_noise,config_.imu_gyr_bias_noise,config_.imu_gyr_bias_noise,config_.imu_gyr_bias_noise)
             .finished();
     imuIntegrator_ = std::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias);
-    fixedLagSmoother_ = std::make_shared<gtsam::BatchFixedLagSmoother>(config_.lag);
+    if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+        batchFixedLagSmoother_ = std::make_shared<gtsam::BatchFixedLagSmoother>(config_.fixed_lag);
+    }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+        gtsam::ISAM2Params parameters;
+        parameters.relinearizeThreshold = 0.0; // Set the relin threshold to zero such that the batch estimate is recovered
+        parameters.relinearizeSkip = 1; // Relinearize every time  
+        isam2FixedLagSmoother_ = std::make_shared<gtsam::IncrementalFixedLagSmoother>(config_.fixed_lag, parameters);
+        // ref: /home/ysugano/code_review/gtsam_4-3/examples/FixedLagSmootherExample.cpp
+    }else{
+        RCLCPP_INFO_STREAM(get_logger(), "Smoother type is not defined. No smoother was created.");
+    }
+
     biasPrevKf_ = gtsam::imuBias::ConstantBias(); // initialize bias, which is updated later in performFixedLagSmoothing()
     biasCurrKf_ = gtsam::imuBias::ConstantBias(); // initialize bias, which is updated later in performFixedLagSmoothing()
     isFGInitialized_ = false;
+
+    // [Note]
+    // gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2,1e-2,1e-2,1e-2,1e-2,1e-2).finished())
+    //  -> 1e-2 becomes standard deviations, the diagonal of the square root covariance matrix
+    //     , where the covariance matrix is a diagonal matrix which is:
+    //    i.e., [(1e-2)^2         0        0        0        0        0]
+    //          [       0  (1e-2)^2        0        0        0        0]
+    //          [       0         0 (1e-2)^2        0        0        0]
+    //          [       0         0        0 (1e-2)^2        0        0]
+    //          [       0         0        0        0 (1e-2)^2        0]
+    //          [       0         0        0        0        0 (1e-2)^2]
+    // gtsam::noiseModel::Isotropic::Sigmas -> all the diagonal elements are the same
+
+    // ref: https://gtsam.org/doxygen/4.0.0/a03227.html
+
+    // std::cout << __FUNCTION__ << __LINE__ << std::endl;
+    // // std::cout << "priorPoseNoise_" << std::endl;
+    // priorPoseNoise_->print("priorPoseNoise_");
+    // // std::cout << "priorVelNoise_" << std::endl;
+    // priorVelNoise_->print("priorVelNoise_");
+    // // std::cout << "priorBiasNoise_" << std::endl;
+    // priorBiasNoise_->print("priorBiasNoise_");
+    // // std::cout << "constLidarOdomNoise_" << std::endl;
+    // constLidarOdomNoise_->print("constLidarOdomNoise_");
+
+    // Eigen::MatrixXd covMatrix = constLidarOdomNoise_->covariance();
+    // std::cout << "constLidarOdomNoise_.covariance():" << std::endl;
+    // std::cout << covMatrix << std::endl;
+
+    stateCurrKf_initGuess_lo_log_ = gtsam::NavState();
+    biasCurrKf_initGuess_lo_log_ = gtsam::imuBias::ConstantBias();
+    stateCurrKf_initGuess_imu_log_ = gtsam::NavState();
+    biasCurrKf_initGuess_imu_log_ = gtsam::imuBias::ConstantBias();
 
     // initialize process flag
     isProcessing_.store(false);  // std::atomic_bool isProcessing_; // for process flag avoiding racing in multi-thread
@@ -401,12 +524,16 @@ void Frontend::initializeInterface()
         config_.imu_acc_bias_noise,
         config_.imu_gyr_bias_noise,
         config_.imu_gravity,
-        config_.lag,
+        config_.fixed_lag,
         config_.use_lo_prior_factor_wo_between_factor,
         config_.factor_graph_init_guess_source
     );
+    ineqConstLogger_.setLogger(get_logger());
+    twistLogger_.setLogger(get_logger());
 
     // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    lm_lambda_ = 0.0;
 
     // initialize voxel map
     voxelMap_.Initialize(config_.voxel_size, config_.voxel_max_distance, config_.max_points_per_voxel);
@@ -414,6 +541,8 @@ void Frontend::initializeInterface()
     // check num. of threads available for parallel threading
     RCLCPP_INFO_STREAM(this->get_logger(), "Max threads OpenMP may use: " << omp_get_max_threads());
     RCLCPP_INFO_STREAM(this->get_logger(), "Number of processors: " << omp_get_num_procs());
+
+    if(!config_.turn_off_pcl_conversion_error_printing) pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
 }
 
 // [Synchronization Policy]
@@ -477,8 +606,12 @@ bool Frontend::synchronizeMeasurements()
         return false;
     }
 
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
     convertCloudMsgToPcl(cloudMsgBuffer_.front(), cloudKfWindow_);
 
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
     if(debug_print_point_cloud_msg_header_timestamp){
         RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
         RCLCPP_INFO_STREAM(get_logger(), "cloudMsgBuffer_.front().header.stamp: " << std::fixed << rclcpp::Time(cloudMsgBuffer_.front().header.stamp).seconds());
@@ -494,7 +627,19 @@ bool Frontend::synchronizeMeasurements()
         RCLCPP_INFO_STREAM(get_logger(), " timeCurrScanEnd_: " << std::fixed << timeCurrScanEnd_);
     }
 
-    // [Lidar Only Process Case]
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    // [Lidar Only Process Case in LO]
+    // if the system is just LO (factor graph is off), return true and just do lidar only process
+    if(!config_.turn_on_factor_graph){
+        mtxCloud_.lock();
+        cloudMsgBuffer_.pop_front();
+        mtxCloud_.unlock();
+        return true;
+    }
+
+
+    // [Lidar Only Process Case in LIO]
     // if there is no imu measurement earlier than the scan beginning time, return true and do lidar only process
     // get the earliest imu measurement left in the buffer
     mtxImu_.lock();
@@ -508,6 +653,8 @@ bool Frontend::synchronizeMeasurements()
         return true; // imuPoseTimeLine_ is empty at this point, so the process goes with lidar only
     }
 
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
     // [Skip the Process (wait for more measurement) Case]
     // if there is no imu measurement later than the scan end time, the current scan is not fully covered with imu measurement yet.
     // so, return false and skip the current process, waiting for imu measurement.
@@ -519,6 +666,8 @@ bool Frontend::synchronizeMeasurements()
         return false; // skip the current process
     }
 
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
     // Now that the current scan time range is fully covered with imu measurements.
     // But there is a chance there are too many imu measurements before the scan begin time.
     // So, we discard too early imu measurements:
@@ -541,16 +690,36 @@ bool Frontend::synchronizeMeasurements()
         else break;
     }
 
+    // Just for debugging
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    // RCLCPP_INFO_STREAM(get_logger(), "imuMsgBuffer_.size(): " << imuMsgBuffer_.size());
+    // for(auto imu: imuMsgBuffer_){
+    //     auto time = rclcpp::Time(imu.header.stamp).seconds();
+    //     RCLCPP_INFO_STREAM(get_logger(), "timeImu: " << std::fixed << time);
+    // }
+    // RCLCPP_INFO_STREAM(get_logger(), "lastTimeImu: " << std::fixed << lastTimeImu);
+    // RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_: " << std::fixed << timeCurrScanEnd_);
+    
+
     // store appropriate imu measurement data into a process container 
     //  .|.....|...  => {.|.....}|...
     for(;;){
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        
         // take the second imu data
         mtxImu_.lock();
         auto secondImu = imuMsgBuffer_[1];      // this is safe since lastTimeImu < timeCurrScanEnd_ above
         mtxImu_.unlock();
 
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         double secondImuTime = rclcpp::Time(secondImu.header.stamp).seconds();
-        if (timeCurrScanEnd_ < secondImuTime){   
+    
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
+        // if (timeCurrScanEnd_ < secondImuTime){   
+        if (timeCurrScanEnd_ <= secondImuTime){   
             mtxImu_.lock();
             imuMsgKfWindow_.push_back(imuMsgBuffer_.front());
             mtxImu_.unlock();
@@ -558,12 +727,18 @@ bool Frontend::synchronizeMeasurements()
             break;
         }
 
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
         mtxImu_.lock();
         imuMsgKfWindow_.push_back(imuMsgBuffer_.front());
         imuMsgBuffer_.pop_front();
         mtxImu_.unlock();
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
     }
 
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    
     // return true as successful flag of synchronization
     mtxCloud_.lock();
     cloudMsgBuffer_.pop_front();
@@ -615,6 +790,7 @@ void Frontend::convertCloudMsgToPcl(const sensor_msgs::msg::PointCloud2& msgIn, 
             ptOut.intensity = ptIn.intensity;
             ptOut.curvature = ptIn.t * 1e-9f;  // !! curvature contains time[sec]
             // discard ring information
+            // RCLCPP_ERROR_STREAM(get_logger(), "ptIn.x: " << int(config_.sensor));
         }
     }else{
         RCLCPP_ERROR_STREAM(get_logger(), "Unknown sensor type: " << int(config_.sensor));
@@ -665,12 +841,28 @@ void Frontend::propagateImu()
     gtsam::imuBias::ConstantBias bias = biasPrevKf_;
 
     if (imuMsgKfWindow_.empty()){
-        RCLCPP_ERROR_STREAM(this->get_logger(), "Keyframe window imu measurements is none. Skip propatgateImu().");
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Keyframe window imu measurements is none. Skip propagateImu().");
         return;
     }
 
     double timeFirstImu = rclcpp::Time(imuMsgKfWindow_[0].header.stamp).seconds();
     imuPoseTimeline_.insert(std::make_pair(timeFirstImu, state));
+
+    // for covariance propagation via imu
+    // get the corrent state covariance
+    gtsam::Matrix9 P0 = gtsam::Matrix9::Identity();
+    // Q = batchFixedLagSmoother_.marginalCovariance(X(key_));
+    if (config_.ekf_use_const_prior_cov){
+        // Q = fill all the diagonal elements with some predefined const.
+        P0 = P0 * config_.ekf_const_diagonal_elem_prior_cov;
+    }else{
+        // add marginal variable as the member variable
+        // extract marginalized covariance of the latest state
+        P0 = stateCovPrevKf_;
+    }
+    gtsam::InvariantEKF<gtsam::NavState> ekf(statePrevKf_, P0);
+    gtsam::Matrix9 P = P0;
+
 
     for (size_t i=0; i<imuMsgKfWindow_.size()-1; i++){
         // reset imuPropagator_ for the next two consecutive imu measurements integration
@@ -723,8 +915,44 @@ void Frontend::propagateImu()
         }
         // use gtsam::NavState::update() -> for forward integration: https://gtsam.org/doxygen/4.0.0/a03507.html#a5494db1f41c8a61acc2d63c32b9adc31
 
+        if (config_.ekf_imu_covariance_prop_on){
+            // get covariance matrix with the current key from the factor graph
+            // gtsam::Matrix9 Q = gtsam::Matrix9::Identity();
+            // // Q = batchFixedLagSmoother_.marginalCovariance(X(key_));
+            // if (config_.ekf_use_const_prior_cov){
+            //     // Q = fill all the diagonal elements with some predefined const.
+            //     Q = Q * config_.ekf_const_diagonal_elem_prior_cov;
+            // }else{
+            //     // add marginal variable as the member variable
+            //     // extract marginalized covariance of the latest state
+            //     Q = stateCovPrevKf_;
+            // }
+            
+            // RCLCPP_INFO_STREAM(get_logger(), "Before update covariance:");
+            // RCLCPP_INFO_STREAM(get_logger(), P);
+
+            // get noise matrix
+            gtsam::Matrix9 Q = imuPropagator_->preintMeasCov();
+            // preintMeasCov() -> COVARIANCE OF: [PreintROTATION PreintPOSITION PreintVELOCITY].
+
+            // prpagate imu
+            gtsam::Vector9 xi;
+            xi << vecGyr, gtsam::Vector3::Zero(), vecAcc;
+            ekf.predict(xi, dt, Q);
+
+            // RCLCPP_INFO_STREAM(get_logger(), "After update covariance:");
+            // RCLCPP_INFO_STREAM(get_logger(), P);
+
+            // stateCovPredCurrKf_imu_ = ekf.covariance();
+            P = ekf.covariance();
+        }
+        // ref: /home/ysugano/code_review/gtsam_4-3/examples/IEKF_NavstateExample.cpp
+        // ref: /home/ysugano/code_review/gtsam_4-3/gtsam/navigation/InvariantEKF.h
+
         imuRawLogger_.recordImuRaw(timeCurrScanBeg_, tPrev, tNext, dt, vecAcc, vecGyr);
     }
+
+    stateCovPredCurrKf_imu_ = P;
 
     // for debugging
     if(debug_print_imu_pose_timeline){
@@ -764,7 +992,11 @@ void Frontend::makeInitialGuessLO()
     Eigen::Vector3d t_bKfWdBeg_bKfWdEnd;
     
     // if enable the initial guess for LO based on imu, set a transformation
-    if (config_.initial_guess_source == "imu" && !imuPoseTimeline_.empty()){
+    if (config_.initial_guess_source == "constant velocity" || imuPoseTimeline_.empty()){
+        // take the previous relative motion
+        q_bKfWdBeg_bKfWdEnd = q_bPrev2Kf_bPrevKf_;
+        t_bKfWdBeg_bKfWdEnd = t_bPrev2Kf_bPrevKf_;
+    }else if (config_.initial_guess_source == "imu"){
         Eigen::Quaterniond q_w_bKfWindowBeg;
         Eigen::Vector3d t_w_bKfWindowBeg;
         getEigenFromGtsam(imuPoseTimeline_.begin()->second, q_w_bKfWindowBeg, t_w_bKfWindowBeg);
@@ -778,14 +1010,34 @@ void Frontend::makeInitialGuessLO()
         // t_w_bKfWindowEnd_ - t_w_bKfWindowBeg : translation of beg->end in world frame
         // q_w_bKfWindowBeg.inverse() * {above} = q_bKfWindowBeg_w * {above}
         //                                      = translation of beg->end in beg frame (OK)
-    }else if(config_.initial_guess_source == "constant velocity"){ 
-        // take the previous relative motion
-        q_bKfWdBeg_bKfWdEnd = q_bPrev2Kf_bPrevKf_;
-        t_bKfWdBeg_bKfWdEnd = t_bPrev2Kf_bPrevKf_;
     }else{
         q_bKfWdBeg_bKfWdEnd = Eigen::Quaterniond::Identity();
         t_bKfWdBeg_bKfWdEnd = Eigen::Vector3d::Zero();
     }
+
+    // // if enable the initial guess for LO based on imu, set a transformation
+    // if (config_.initial_guess_source == "imu" && !imuPoseTimeline_.empty()){
+    //     Eigen::Quaterniond q_w_bKfWindowBeg;
+    //     Eigen::Vector3d t_w_bKfWindowBeg;
+    //     getEigenFromGtsam(imuPoseTimeline_.begin()->second, q_w_bKfWindowBeg, t_w_bKfWindowBeg);
+
+    //     Eigen::Quaterniond q_w_bKfWindowEnd_;
+    //     Eigen::Vector3d t_w_bKfWindowEnd_;
+    //     getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
+        
+    //     q_bKfWdBeg_bKfWdEnd = (q_w_bKfWindowBeg.inverse() * q_w_bKfWindowEnd_).normalized();
+    //     t_bKfWdBeg_bKfWdEnd = q_w_bKfWindowBeg.inverse() * (t_w_bKfWindowEnd_ - t_w_bKfWindowBeg);
+    //     // t_w_bKfWindowEnd_ - t_w_bKfWindowBeg : translation of beg->end in world frame
+    //     // q_w_bKfWindowBeg.inverse() * {above} = q_bKfWindowBeg_w * {above}
+    //     //                                      = translation of beg->end in beg frame (OK)
+    // }else if(config_.initial_guess_source == "constant velocity"){ 
+    //     // take the previous relative motion
+    //     q_bKfWdBeg_bKfWdEnd = q_bPrev2Kf_bPrevKf_;
+    //     t_bKfWdBeg_bKfWdEnd = t_bPrev2Kf_bPrevKf_;
+    // }else{
+    //     q_bKfWdBeg_bKfWdEnd = Eigen::Quaterniond::Identity();
+    //     t_bKfWdBeg_bKfWdEnd = Eigen::Vector3d::Zero();
+    // }
 
     q_bPrevKf_bCurrKf_initGuess_ = q_bKfWdBeg_bKfWdEnd;
     t_bPrevKf_bCurrKf_initGuess_ = t_bKfWdBeg_bKfWdEnd;
@@ -809,8 +1061,9 @@ void Frontend::deskewPointCloud()
     if (pointsTimestampAvailable_
         && (imuPoseTimeline_.empty() || config_.motion_compensation_source == "constant velocity") 
         && (!t_bPrev2Kf_bPrevKf_.isApprox(Eigen::Vector3d::Zero(), 1e-9) && !q_bPrev2Kf_bPrevKf_.isApprox(Eigen::Quaterniond::Identity(), 1e-9))){ // [TODO] velocity should be drawn from NavState statePrevKf_
-        RCLCPP_INFO_STREAM(get_logger(), "t_bPrev2Kf_bPrevKf_: " << t_bPrev2Kf_bPrevKf_.transpose());
-        RCLCPP_INFO_STREAM(get_logger(), "q_bPrev2Kf_bPrevKf_: " << q_bPrev2Kf_bPrevKf_);
+        RCLCPP_INFO_STREAM(get_logger(), "Deskew point cloud based on constant velocity model.");
+        // RCLCPP_INFO_STREAM(get_logger(), "t_bPrev2Kf_bPrevKf_: " << t_bPrev2Kf_bPrevKf_.transpose());
+        // RCLCPP_INFO_STREAM(get_logger(), "q_bPrev2Kf_bPrevKf_: " << q_bPrev2Kf_bPrevKf_);
 
         // follows kiss-icp way
         const double min_time = timeCurrScanBeg_ + cloudKfWindow_->points.front().curvature;
@@ -860,6 +1113,7 @@ void Frontend::deskewPointCloud()
     //  then deskew point cloud based on the imu prediction
     else if(pointsTimestampAvailable_ && config_.motion_compensation_source == "imu" && !imuPoseTimeline_.empty()){
         getEigenFromGtsam(std::prev(imuPoseTimeline_.end())->second, q_w_bKfWindowEnd_, t_w_bKfWindowEnd_);
+        RCLCPP_INFO_STREAM(get_logger(), "Deskew point cloud based on imu forward propagation.");
 
         if(debug_print_deskew_pointcloud)
             std::cout << "std::prev(imuPoseTimeline_.end()) -> second = " << std::prev(imuPoseTimeline_.end())->second << std::endl;
@@ -1038,12 +1292,15 @@ bool Frontend::initializeCloudMap(){
     //      -> for the first process, velocity is not available so we can not deskew point cloud
 
     // 0. Check at least two point cloud msgs are available to safely extract the current scan end time
-    mtxCloud_.lock();
-    bool isNextCloudAvailable = (cloudMsgBuffer_.size() > 1);
-    mtxCloud_.unlock();
-    if(!isNextCloudAvailable){
-         RCLCPP_INFO_STREAM(get_logger(), "The first scan end time is not available, skip the process." );
-         return false;
+    if(config_.point_cloud_msg_timestamp == "scan_beginning_time"){
+        mtxCloud_.lock();
+        bool isNextCloudAvailable = (cloudMsgBuffer_.size() > 1);
+        mtxCloud_.unlock();
+        // [TODO] This probebly should be only in the case of config_.point_cloud_msg_timestamp == "scan_beginning_time". need to be fixed
+        if(!isNextCloudAvailable){
+            RCLCPP_INFO_STREAM(get_logger(), "The first scan end time is not available, skip the process." );
+            return false;
+        }
     }
 
     //  1. update time timeCurrScanEnd to the end time of the first scan -> this becomes timePrevScanEnd at next round
@@ -1287,7 +1544,7 @@ void Frontend::downsampleCloud()
     }
 }
 
-void Frontend::solveLeastSquares()
+void Frontend::solveLeastSquares_Ceres_LeftMultiplying()
 {
     if(!config_.use_voxel_map){
         // set the local map point cloud to the kd_tree to nearest neighbor search
@@ -1315,6 +1572,12 @@ void Frontend::solveLeastSquares()
 
     // ICP iteration (point-to-plane)
     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) {
+
+        // moved to here to keep the last residual parameters for Hessian analysis
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
+
         // define a loss function with some kernel
         ceres::LossFunction *lossFunction = new ceres::HuberLoss(0.1); // the Huber kernel is the same as liliom
 
@@ -1374,7 +1637,7 @@ void Frontend::solveLeastSquares()
             // point-to-plane residual (=nx+d) will be computed in the cost function (LidarPlaneNormIncreFactor)
             // one point corresponds to one residual(cost function) 
             // Jacobian is to be computed in ceres::AutoDiff in LidarPlaneNormIncreFactor, so we don't define analytical Jacobian in this code
-            ceres::CostFunction *costFunction = LidarPlaneNormIncreFactor::Create(currentPt, norm, normInverse);
+            ceres::CostFunction *costFunction = LidarPlaneNormIncreFactor_LeftMultiplying::Create(currentPt, norm, normInverse);
             problem.AddResidualBlock(costFunction, lossFunction, icpPoseParam, icpPoseParam + 4);
             // -> icpPoseParam   = parameters of rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
             // -> icpPoseParam+4 = parameters of translation component in icpPoseParam (icpPoseParam[4],[5],[6])
@@ -1412,9 +1675,10 @@ void Frontend::solveLeastSquares()
             icpPoseParam[3] = tmpQ.z();
         }
 
-        pointScanCurrInBForResidual_.clear();
-        planeNormalForResidual_.clear();
-        planeDistFromOriginForResidual_.clear();
+        // moved to the top to keep the last residual parameters for Hessian analysis
+        // pointScanCurrInBForResidual_.clear();
+        // planeNormalForResidual_.clear();
+        // planeDistFromOriginForResidual_.clear();
 
         // update the pose variables to the latest optimized ones
         // icpPoseParam[] is what is being optimized in the Ceres process above
@@ -1429,6 +1693,214 @@ void Frontend::solveLeastSquares()
                             icpPoseParam[4],
                             icpPoseParam[5],
                             icpPoseParam[6]);
+    }
+    // end of the point-to-plane icp
+}
+
+void Frontend::solveLeastSquares_Ceres_RightMultiplying()
+{
+    if(!config_.use_voxel_map){
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+    }
+
+    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    // create pose parameters variables to optimize in Ceres solver    
+    // pose representation: [quaternion: w, x, y, z | transition: x, y, z]
+    // this parameters are iteratively optimized in Ceres
+    // we have to give pointers of the pose parameters to Ceres
+    // note that these parameters must represent an absolute pose (T_w_b: transformation of the robot w.r.t. the world) due to the design of Ceres solver
+    //  because the jacobian is left-jacobian so the pose increment should bd wrt world frame = absolute pose
+    // double icpPoseParam[7] = 
+    // {
+    //     q_w_bCurrKf_.w(),
+    //     q_w_bCurrKf_.x(),
+    //     q_w_bCurrKf_.y(),
+    //     q_w_bCurrKf_.z(),
+    //     t_w_bCurrKf_.x(),
+    //     t_w_bCurrKf_.y(),
+    //     t_w_bCurrKf_.z()
+    // };
+
+    // Eigen::Vector3d t_lifting_point = t_w_bCurrKf_;
+    // Eigen::Quaterniond q_lifting_point = q_w_bCurrKf_;
+
+    // // starts from zero increment
+    // // this is pose increment
+    // double icpPoseParam[7] = 
+    // {
+    //     1.0,
+    //     0.0,
+    //     0.0,
+    //     0.0,
+    //     0.0,
+    //     0.0,
+    //     0.0
+    // };
+
+    // [TODO] initial guess is already incremented to q_w_bCurrKf_, t_w_bCurrKf_ in setInitialPoseLO()
+    //        but it should be incremented here as initialization of icpPoseParam[]
+    //        So, icpPoseParam[] should start with the initial guess pose -> this is more strainghtforward
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) {
+
+        Eigen::Vector3d t_lifting_point = t_w_bCurrKf_;
+        Eigen::Quaterniond q_lifting_point = q_w_bCurrKf_;
+
+        // starts from zero increment
+        // this is pose increment
+        double icpPoseParam[7] = 
+        {
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+        };
+
+        // moved to here to keep the last residual parameters for Hessian analysis
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
+
+        // define a loss function with some kernel
+        ceres::LossFunction *lossFunction = new ceres::HuberLoss(0.1); // the Huber kernel is the same as liliom
+
+        // define rotation parameterization: we parameterize rotation as quarternion by using built-in parameterization in Ceres
+        // if you use variables that live on manifolds(Lie-Groups) you have to define local parameterizations to tell Ceres how to manipulate those variables
+        // translation components live on a common vector space so they don't need parameterization, but rotation components do.
+        ceres::LocalParameterization *quatParameterization = new ceres::QuaternionParameterization();
+
+        // create a problem object in Ceres
+        ceres::Problem problem;
+
+        // add a pointer to the rotation variables to optimize, with the parameterization
+        problem.AddParameterBlock(icpPoseParam, 4, quatParameterization);
+        // void Problem::AddParameterBlock(double *values, int size, Manifold *manifold)
+        //  -> icpPoseParam,4,quatParameterization = pointer to icpPoseParam[0] and 4 succeeding components in the array with manifold parameterization
+        //                                         = rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
+
+        // add a pointer to the translation variables to optimize 
+        problem.AddParameterBlock(icpPoseParam + 4, 3);
+        // void Problem::AddParameterBlock(double *values, int size)
+        //  -> icpPoseParam+4,3 = pointer to icpPoseParam[4] and 3 succeeding components in the array 
+        //                      = translation component in icpPoseParam (icpPoseParam[4],[5],[6])
+
+        timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+        // compute necessary values for point-to-plane residual computation
+        // this is a praparation for the objective function in the least squares, later added to the problem by AddResidualBlock()
+        preparePointPlaneResidual();
+        // compute:
+        // x:point position in world
+        // n:plane normal in world
+        // d:the distance from the world origin to the plane -> plane offset (scaler)
+        timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+        // for debugging
+        if (debug_print_num_residuals) {
+            // std::cout << "num. of pts nn found = " << numPtsNnFound_ << std::endl;
+            // std::cout << "num. of residual points = " << numResidual_ << std::endl;
+            RCLCPP_INFO_STREAM(get_logger(), "num. of pts nn found = " << numPtsNnFound_);
+            RCLCPP_INFO_STREAM(get_logger(), "num. of residual points = " << numResidual_);
+        }
+
+        // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+        for (int i = 0; i < numResidual_; ++i) {
+            // set x:the point position
+            Eigen::Vector3d currentPt = pointScanCurrInBForResidual_[i]; // Eigen::Vector3d ver.
+            // here currentPt is a measured point in the body frame and the transformation from body to world is done in LidarPlaneNormIncreFactor
+            // note that we have to give the point position in BODY to allow Ceres to examine the loss change w.r.t. the transformation increment in LidarPlaneNormIncreFactor
+            // We always give point coordinate in Body to the optimization solver since point B->W transformation is done based on the transformation at the current iteration in non-linear optimization for solving the current icp iteration
+            //      inner loop: non-linear optimization -> update Jacobian, residual, pose increment at each iteration
+            //      outer loop: icp iteration -> update NN points, plane normal, plane offset
+            
+            // set n:the normal
+            Eigen::Vector3d norm = planeNormalForResidual_[i];
+            // set d:distance from the world origin to the plane(=norm inverse)
+            double normInverse = planeDistFromOriginForResidual_[i]; // Eigen::Vector3d ver.
+            // set cost function (residual) based on x,n,d
+            // point-to-plane residual (=nx+d) will be computed in the cost function (LidarPlaneNormIncreFactor)
+            // one point corresponds to one residual(cost function) 
+            // Jacobian is to be computed in ceres::AutoDiff in LidarPlaneNormIncreFactor, so we don't define analytical Jacobian in this code
+            // ceres::CostFunction *costFunction = LidarPlaneNormIncreFactor::Create(currentPt, norm, normInverse);
+            ceres::CostFunction *costFunction = LidarPlaneNormIncreFactor_RightMultiplying::Create(currentPt, norm, normInverse, q_lifting_point, t_lifting_point);
+            problem.AddResidualBlock(costFunction, lossFunction, icpPoseParam, icpPoseParam + 4);
+            // -> icpPoseParam   = parameters of rotation component in icpPoseParam (icpPoseParam[0],[1],[2],[3])
+            // -> icpPoseParam+4 = parameters of translation component in icpPoseParam (icpPoseParam[4],[5],[6])
+            // ResidualBlockId Problem::AddResidualBlock(CostFunction *cost_function, LossFunction *loss_function, const std::vector<double*> parameter_blocks)
+        }
+
+        // set some solver parameters
+        ceres::Solver::Options solverOptions;
+        solverOptions.linear_solver_type = ceres::DENSE_QR;
+        solverOptions.max_num_iterations = config_.max_iterations;
+        solverOptions.max_solver_time_in_seconds = config_.max_solver_time_in_seconds;
+        solverOptions.minimizer_progress_to_stdout = false;
+        solverOptions.check_gradients = false;
+        solverOptions.gradient_check_relative_precision = 1e-2;
+
+        // create a solution container
+        ceres::Solver::Summary summary;
+
+        timeLogger_.start("ceres::Solve", __FUNCTION__, __LINE__);
+        // solve the least squares for the current iteration in ICP
+        ceres::Solve(solverOptions, &problem, &summary);
+        timeLogger_.stop("ceres::Solve", __FUNCTION__, __LINE__);
+
+        // make sure w in rotation quaternion is positive (carried over from liliom)
+        // this might not be necesary but keep it just in case
+        if(icpPoseParam[0] < 0) {
+            Eigen::Quaterniond tmpQ(icpPoseParam[0],
+                    icpPoseParam[1],
+                    icpPoseParam[2],
+                    icpPoseParam[3]);
+            tmpQ = unifyQuaternion(tmpQ);
+            icpPoseParam[0] = tmpQ.w();
+            icpPoseParam[1] = tmpQ.x();
+            icpPoseParam[2] = tmpQ.y();
+            icpPoseParam[3] = tmpQ.z();
+        }
+
+        // moved to the top to keep the last residual parameters for Hessian analysis
+        // pointScanCurrInBForResidual_.clear();
+        // planeNormalForResidual_.clear();
+        // planeDistFromOriginForResidual_.clear();
+
+        // update the pose variables to the latest optimized ones
+        // icpPoseParam[] is what is being optimized in the Ceres process above
+        // we need to update the pose (q_w_bCurrKf_, t_w_bCurrKf_) to re-compute the nearest neighbor points and planes in preparePointPlaneResidual() at each iteration
+        // , so we have to update the pose variables(q_w_bCurrKf_, t_w_bCurrKf_) at each ICP iteration.
+        // q_w_bCurrKf_ = Eigen::Quaterniond(
+        //                     icpPoseParam[0],
+        //                     icpPoseParam[1],
+        //                     icpPoseParam[2],
+        //                     icpPoseParam[3]);
+        // t_w_bCurrKf_ = Eigen::Vector3d(
+        //                     icpPoseParam[4],
+        //                     icpPoseParam[5],
+        //                     icpPoseParam[6]);
+
+        // extract pose increment 
+        Eigen::Quaterniond q_increment = Eigen::Quaterniond(
+                                                icpPoseParam[0],
+                                                icpPoseParam[1],
+                                                icpPoseParam[2],
+                                                icpPoseParam[3]);
+        q_increment.normalized();
+        Eigen::Vector3d t_increment = Eigen::Vector3d(
+                                                icpPoseParam[4],
+                                                icpPoseParam[5],
+                                                icpPoseParam[6]);
+        
+        // update the current pose for the next icp iteration
+        t_w_bCurrKf_ = q_w_bCurrKf_ * t_increment + t_w_bCurrKf_;
+        q_w_bCurrKf_ = (q_w_bCurrKf_ * q_increment).normalized();
     }
     // end of the point-to-plane icp
 }
@@ -1606,6 +2078,212 @@ void Frontend::preparePointPlaneResidual(){
     numResidual_ = static_cast<int>(planeNormalForResidual_.size());
 }
 
+
+void Frontend::computeCovarianceLO()
+{
+    Eigen::MatrixXd A(numResidual_, 6); // stacked Jacobian
+    Eigen::MatrixXd b(numResidual_, 1); // residual vectorn
+    Eigen::MatrixXd b_for_kernel(numResidual_, 1); // residual vector to be used for kernel weight computation
+
+    // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+    for (int i = 0; i < numResidual_; ++i) 
+    {
+        const Eigen::Vector3d bp = pointScanCurrInBForResidual_[i];
+        const Eigen::Vector3d wp = q_w_bCurrKf_ * bp + t_w_bCurrKf_; // should be updated at each iteration based on the current pose update
+        const Eigen::Vector3d wn = planeNormalForResidual_[i];  // plane normal (does not change depending on the current body pose)
+        const double d = planeDistFromOriginForResidual_[i];    // plane offset (does not change depending on the current body pose)
+
+        // Jacobian Computation
+        if(config_.pose_increment_multiplication == "right")
+        {
+            // Right Jacobian
+            Eigen::Matrix3d Rwb = q_w_bCurrKf_.toRotationMatrix();
+            Eigen::Matrix3d bp_hat = getSkewSymMatrix(bp);
+            // row i of A: [ -wn^T @ Rwb @ [bp]x  wn^T @ Rwb ]
+            A.row(i).head<3>() = -wn.transpose() * Rwb * bp_hat;
+            A.row(i).tail<3>() = wn.transpose() * Rwb;
+            // residual b = - (wn^T @ wp + d)
+            b(i) = - (wn.transpose() * wp + d);
+            b_for_kernel(i) = b(i);             // for kernel weighting for robustifying the cost function, which is to be used later
+            // following a conventional || A x - b' || notation
+            // = || A x - (- (wn^T @ wp + d)) || 
+            // = || A x + (wn^T @ wp + d) ||  
+            // = || A x + b0 || where b0 = wn.transpose() * wp(0) + d
+        }
+        else if (config_.pose_increment_multiplication == "left")
+        {
+            // Left Jacobian
+            // row i of A: [ (p × n)^T  n^T ]
+            A.row(i).head<3>() = wp.cross(wn).transpose();
+            A.row(i).tail<3>() = wn.transpose();
+            // residual b = - (wn^T @ wp + d)
+            b(i) = - (wn.transpose() * wp + d);
+            b_for_kernel(i) = b(i);
+        }
+        else
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "Left or Right Jacobian is not defined. Jacobian is set to zero.");
+        }
+
+        // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+        // // auto residual = [&](const Eigen::Vector3d& w, const Eigen::Vector3d& t){
+        // //   return wn.dot( (Eigen::AngleAxisd(w.norm(), (w.norm()>1e-12)? w.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix() * bp) + t ) + d;
+        // // };
+        // Eigen::Vector3d w0 = Eigen::Vector3d::Zero();
+        // Eigen::Vector3d t0 = Eigen::Vector3d::Zero();
+
+        // // Your analytical J at (w0,t0): A_i = [ -n^T R [b]x , n^T R ] with R from current pose
+        // Eigen::RowVector<double,6> Ai;
+        // Ai.head<3>() = -wn.transpose() * Rwb * bp_hat;
+        // Ai.tail<3>() =  wn.transpose() * Rwb;
+
+        // // Finite-diff directional check
+        // Eigen::Matrix<double,6,1> v; v.setRandom(); v.normalize();
+        // double eps = 1e-8;
+        // Eigen::Vector3d dw = v.head<3>() * eps;
+        // Eigen::Vector3d dt = v.tail<3>() * eps;
+
+        // double r0 = wn.dot(Rwb*bp + t_w_bCurrKf_) + d;
+        // Eigen::Matrix3d R1 = Rwb * Eigen::AngleAxisd(dw.norm(), (dw.norm()>1e-12)? dw.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix();
+        // double r1 = wn.dot(R1*bp + (t_w_bCurrKf_ + Rwb*dt)) + d;
+
+        // double fd = (r1 - r0) / eps;
+        // double an = Ai * v;
+        // // std::cout << "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an) << "\n";
+        // RCLCPP_INFO_STREAM(get_logger(), "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an));
+        // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+    }
+    
+    Eigen::DiagonalMatrix<double, Eigen::Dynamic> D; // Jacobian Scaling Matrix
+    Eigen::VectorXd dj;  // scaling factor for each column
+    if (config_.turn_on_jacobian_column_scaling_qp_active_set)
+    {
+        // bounds/constraints scaled on the step x 
+        // Eigen::VectorXd lb_x, ub_x;        // direct bounds on x
+        // Eigen::MatrixXd Acon;              // general constraint matrix on x 
+        // Eigen::VectorXd Alb_x, Aub_x;
+
+        // 1) Build column-scaling matrix D so that columns of A_s = A * D have norm ~1 ---
+        const int n = A.cols();
+        Eigen::VectorXd col_norms(n);
+        for (int j = 0; j < n; ++j)
+        {
+            col_norms(j) = A.col(j).norm();
+        }
+        const double eps   = 1e-12;    // avoid division by zero
+        const double dmin  = 1e-5;     // clamp factors to avoid extreme scaling
+        const double dmax  = 1e+5;
+        // Eigen::VectorXd dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column
+        dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column, eps: caring for numerical stability
+        dj = dj.cwiseMax(dmin).cwiseMin(dmax);
+        // construct a column-scaling matrix D, where diagonal elements are dj
+        D = dj.asDiagonal();
+
+        // 2) Scaled Jacobian and transform bounds/constraints ---
+        // column scaling, matrix multiplication
+        Eigen::MatrixXd A_s = A * D;           // columns ~ unit-norm
+        // // If you have simple bounds on the step x, convert to z: z = D^{-1} x
+        // Eigen::VectorXd lb_z, ub_z;
+        // if (lb_x.size() == n && ub_x.size() == n) {
+        // // Dinv is just 1/dj
+        // Eigen::VectorXd d_inv = dj.cwiseInverse();
+        // lb_z = lb_x.cwiseProduct(d_inv);
+        // ub_z = ub_x.cwiseProduct(d_inv);
+        // }
+        // // If you have general linear constraints on x: Acon * x in [Alb_x, Aub_x]
+        // // convert to z: (Acon * D) * z in [Alb_x, Aub_x]
+        // Eigen::MatrixXd Acon_z;
+        // if (Acon.size() > 0) Acon_z = Acon * D;
+
+        // 3) Build QP in z: min 1/2 z^T H_s z + h_s^T z ---
+        //  done in the following scripts
+
+        // Now that se have ||Ax - b||2 = ||(AD)(D^-1x) - b||2 = ||(A_s)z - b||2 
+        //  (A_s) =    AD   : column-wise scaled Jacobian
+        //    z   = (D^-1x) : scaled state vector (to be mapped back to x after solving QP)
+
+        // update A to As (column-wise scaled A)
+        A = A_s; 
+    }
+    
+    // build the QP formulation
+    // min(xQP): 1/2 xQP.T @ HQP @ xQP + hQP.T @ xQP
+    // s.t.    : lb  <=   xQP   <= ub
+    //           Alb <= A @ xQP <= Aub
+
+    Eigen::Matrix<double,6,6> HQP = Eigen::Matrix<double,6,6>::Zero();  // Hessian in QP
+    Eigen::Matrix<double,6,1> hQP = Eigen::Matrix<double,6,1>::Zero();  // h matrix in QP
+
+    // compute the weights first based on the robust kernel
+    Eigen::VectorXd w;  
+    if(config_.turn_on_robust_kernel_qp_active_set)
+    {
+        // if(config_.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set)
+        // {
+        double s = 0.0; // default scaling just as an option manually tune it
+        double c = 0.0; // default range just as an option manually tune it
+        computeWeightsFromResiduals(b_for_kernel, w, s, config_.robust_kernel_qp_active_set, c, true);
+    }
+    else
+    {
+        w = Eigen::VectorXd::Ones(b_for_kernel.size());
+    }
+
+    if (debug_print_qp_active_set_matrices)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "w: ");
+        RCLCPP_INFO_STREAM(get_logger(), w.transpose());
+    }
+
+    // Eigen::MatrixXd W = w.asDiagonal(); // This is super expensive, keep this just in case
+    Eigen::DiagonalMatrix<double, Eigen::Dynamic> W = w.asDiagonal();   // fast
+
+    if(config_.qp_active_set_Hessian_computation == "matrix_multiplication")
+    {
+        // cleaner but slow way
+        HQP = 2 * A.transpose() * W * A;
+        hQP = - 2 * A.transpose() * W * b;
+    }
+    else if(config_.qp_active_set_Hessian_computation == "for_loop")
+    {
+        // fast way
+        for (int i = 0; i < numResidual_; ++i) 
+        {
+            double wi = w(i);
+            Eigen::Matrix<double,1,6> ai = A.row(i);
+            HQP.noalias() += 2.0 * wi * (ai.transpose() * ai);
+            hQP.noalias() += - 2.0 * wi * ai.transpose() * b(i);
+        }
+    }
+    else
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "Hessian Computation is not defined well. Set Hessian to zero.");
+    }
+
+    // We should not add any damping term
+    // if(config_.turn_on_levenberg_marquardt_qp_active_set)
+    // {
+    //     const double lambda = config_.levenberg_marquardt_lambda_qp_active_set;
+    //     if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping)
+    //     {
+    //         HQP += 2.0 * lambda * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+    //     }
+    //     else
+    //     {
+    //         HQP += 2.0 * lambda * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+    //     }
+    // }
+
+    // update the lidar odometry measurement covariance
+    lidarOdomNoise_ = gtsam::noiseModel::Gaussian::Information(HQP);
+    icpHessianLatest_log_ = HQP;
+}
+
+// void Frontend::degeneracyAnalysisLO()
+// {
+
+// }
+
 void Frontend::updatePoseLO()
 {
     // right-hand side update
@@ -1675,7 +2353,7 @@ void Frontend::run()
     timeLogger_.start("synchronizeMeasurements", __FUNCTION__, __LINE__);
     bool isSyncSuccess = synchronizeMeasurements();
     if(isSyncSuccess && !imuMsgKfWindow_.empty()){
-        RCLCPP_INFO_STREAM(get_logger(), "Lidar-Imu frames were time-synchronized well.");
+        if(config_.print_sync_status) RCLCPP_INFO_STREAM(get_logger(), "Lidar-Imu frames were time-synchronized well.");
         // for debugging
         if(debug_print_scan_imu_time_sync){
             RCLCPP_INFO_STREAM(get_logger(), "  Imu Data Beginning: " << std::fixed << rclcpp::Time(imuMsgKfWindow_.front().header.stamp).seconds());
@@ -1684,7 +2362,7 @@ void Frontend::run()
             RCLCPP_INFO_STREAM(get_logger(), "   Lidar Scan Ending: " << std::fixed << timeCurrScanEnd_);
         }
     }else if(isSyncSuccess && imuMsgKfWindow_.empty()){
-        RCLCPP_INFO_STREAM(get_logger(), "Earliest Imu measurement doesn't catch up with the lidar scan beginning time. Process only lidar measurement.");
+        if(config_.print_sync_status) RCLCPP_INFO_STREAM(get_logger(), "Earliest Imu measurement doesn't catch up with the lidar scan beginning time. Process only lidar measurement.");
         isCurrFrameLidarOnlyEstimation_ = true;
     }else{    // synchronization failure, need to wait more imu for the current lidar frame
         // RCLCPP_INFO_STREAM(get_logger(), "Sufficient Imu measurement hasn't come yet.");
@@ -1725,7 +2403,7 @@ void Frontend::run()
     // Propagate Imu
     if(isStateInitialized_){
         timeLogger_.start("propagateImu", __FUNCTION__, __LINE__);
-        propagateImu();
+        propagateImu();     // if imu covariance prediction is on, run left-invariant kalman filter here.
         timeLogger_.stop("propagateImu", __FUNCTION__, __LINE__);
     }
 
@@ -1773,16 +2451,60 @@ void Frontend::run()
 
     if (debug_print_lines_in_run) RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
-    if(config_.turn_on_qp_ineq_constraints_active_set){
+    if(config_.inequality_constraints_solver == "Ceres_left_multiplying"){
+        timeLogger_.start("solveLeastSquares_Ceres_LeftMultiplying", __FUNCTION__, __LINE__);
+        solveLeastSquares_Ceres_LeftMultiplying();    // unconstrained least squares
+        timeLogger_.stop("solveLeastSquares_Ceres_LeftMultiplying", __FUNCTION__, __LINE__);
+    }else if(config_.inequality_constraints_solver == "Ceres_right_multiplying"){
+        timeLogger_.start("solveLeastSquares_Ceres_RightMultiplying", __FUNCTION__, __LINE__);
+        solveLeastSquares_Ceres_RightMultiplying();    // unconstrained least squares
+        timeLogger_.stop("solveLeastSquares_Ceres_RightMultiplying", __FUNCTION__, __LINE__);
+    }else if(config_.inequality_constraints_solver == "qpmad"){
         timeLogger_.start("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
         solveLeastSquares_InequalityConstraints_ActiveSet();
         timeLogger_.stop("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
+    }else if(config_.inequality_constraints_solver == "LBFGSpp"){
+        timeLogger_.start("solveLeastSquares_InequalityConstraints_BFGS", __FUNCTION__, __LINE__);
+        solveLeastSquares_InequalityConstraints_BFGS(); 
+        timeLogger_.stop("solveLeastSquares_InequalityConstraints_BFGS", __FUNCTION__, __LINE__);
+    }else if(config_.inequality_constraints_solver == "ifopt"){
+        timeLogger_.start("solveLeastSquares_InequalityConstraints_IFOPT", __FUNCTION__, __LINE__);
+        solveLeastSquares_InequalityConstraints_IFOPT(); 
+        timeLogger_.stop("solveLeastSquares_InequalityConstraints_IFOPT", __FUNCTION__, __LINE__);
     }else{
-        timeLogger_.start("solveLeastSquares", __FUNCTION__, __LINE__);
-        solveLeastSquares();    // unconstrained least squares
-        timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
+        RCLCPP_INFO_STREAM(get_logger(), "The least squares solver is not specified well. Skip ICP for LO.");
     }
+
+    // if(config_.turn_on_qp_ineq_constraints_active_set){
+    //     timeLogger_.start("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
+    //     solveLeastSquares_InequalityConstraints_ActiveSet();
+    //     timeLogger_.stop("solveLeastSquares_InequalityConstraints_ActiveSet", __FUNCTION__, __LINE__);
+    // }else if(config_.bfgs_on_inequality_constraint){
+    //     timeLogger_.start("solveLeastSquares_InequalityConstraints_BFGS", __FUNCTION__, __LINE__);
+    //     solveLeastSquares_InequalityConstraints_BFGS(); 
+    //     timeLogger_.stop("solveLeastSquares_InequalityConstraints_BFGS", __FUNCTION__, __LINE__);
+    // }else if(config_.ifopt_on_inequality_constraint){
+    //     timeLogger_.start("solveLeastSquares_InequalityConstraints_IFOPT", __FUNCTION__, __LINE__);
+    //     solveLeastSquares_InequalityConstraints_IFOPT(); 
+    //     timeLogger_.stop("solveLeastSquares_InequalityConstraints_IFOPT", __FUNCTION__, __LINE__);
+    // }else{
+    //     timeLogger_.start("solveLeastSquares", __FUNCTION__, __LINE__);
+    //     solveLeastSquares();    // unconstrained least squares
+    //     timeLogger_.stop("solveLeastSquares", __FUNCTION__, __LINE__);
+    // }
     // update t_w_bCurrKf_ and q_w_bCurrKf_
+
+    if (debug_print_lines_in_run) RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    if(!config_.fix_lidar_odom_covariance){
+        timeLogger_.start("computeCovarianceLO", __FUNCTION__, __LINE__);
+        computeCovarianceLO();
+        timeLogger_.stop("computeCovarianceLO", __FUNCTION__, __LINE__);
+    }
+
+    // timeLogger_.start("degeneracyAnalysisLO", __FUNCTION__, __LINE__);
+    // degeneracyAnalysisLO();
+    // timeLogger_.stop("degeneracyAnalysisLO", __FUNCTION__, __LINE__);
 
     if (debug_print_lines_in_run) RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
@@ -2091,27 +2813,7 @@ void Frontend::clearProcess()
 void Frontend::updateState() 
 {
     // for sanity check for imu and lidar relative pose estimation
-    logRelativePoseEstimateEachSensor();
-
-    // logFactorGraphState();
-
-    // Add everything-logger
-    // Header contains:  <- this should be defined in initialize parameter()
-    //  - execution time
-    //  - some config parameters to take
-    // At every iteration, to log:
-    //  - time scan current Beg, current end of lidar
-    //  - time imu starting/ending
-    //  - key id
-    //  - lo between factor
-    //  - imu between factor
-    //  - previous state (pose, vel, state)
-    //  - initial guess for current state
-    //  - optimized result for current state
-    //  - num. of keyframes in the fixed-lag window
-    //  - is this factor graph or fg is not activated still
-    //  - also can we extract covariance matrix?
-
+    // logRelativePoseEstimateEachSensor();
 
     // Compute the current relative pose for the following computation 
     const Eigen::Quaterniond q_bPrevKf_bCurrKf = (q_w_bPrevKf_.inverse() * q_w_bCurrKf_).normalized();
@@ -2153,6 +2855,7 @@ void Frontend::updateState()
     // Update GTSAM state variables
     statePrevKf_ = stateCurrKf_;
     biasPrevKf_ = biasCurrKf_;
+    stateCovPrevKf_ = stateCovCurrKf_;
 
     // Update the imu preintegrator
     imuIntegrator_->resetIntegrationAndSetBias(biasCurrKf_);
@@ -2197,7 +2900,36 @@ bool Frontend::initializeFG()
     // }
 
     // Update the optimizer once
-    fixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+    // batchFixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+
+    // isam2FixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+    // for(size_t i = 1; i < 2; ++i) { // Optionally perform multiple iSAM2 iterations
+    //     isam2FixedLagSmoother_->update();
+    // }
+    if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+        batchFixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+    }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+        isam2FixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+        for(size_t i = 1; i < 2; ++i) { // Optionally perform multiple iSAM2 iterations
+            isam2FixedLagSmoother_->update();
+        }
+    }
+    // ref: /home/ysugano/code_review/gtsam_4-3/examples/FixedLagSmootherExample.cpp
+
+    // // just to check if marginals() works
+    // gtsam::Values result;
+    // if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+    //     result = batchFixedLagSmoother_->calculateEstimate();
+    // }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+    //     result = isam2FixedLagSmoother_->calculateEstimate();
+    // }  
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    // gtsam::Marginals marginals(graphFactors_, result, gtsam::Marginals::QR);
+    // marginals.print();
+    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    // // stateCovCurrKf_ = marginals.marginalCovariance(X(key_));
+
+
     graphFactors_.resize(0);
     graphValues_.clear();
     keyTimestamps_.clear();
@@ -2218,7 +2950,21 @@ void Frontend::resetSmoother()
     // optParameters.relinearizeSkip = 1;
     // optimizer = gtsam::ISAM2(optParameters);
 
-    fixedLagSmoother_ = std::make_shared<gtsam::BatchFixedLagSmoother>(config_.lag);
+    // batchFixedLagSmoother_ = std::make_shared<gtsam::BatchFixedLagSmoother>(config_.fixed_lag);
+        
+    // ISAM2Params parameters;
+    // parameters.relinearizeThreshold = 0.0; // Set the relin threshold to zero such that the batch estimate is recovered
+    // parameters.relinearizeSkip = 1; // Relinearize every time  
+    // isam2FixedLagSmoother_ = std::make_shared<gtsam::IncrementalFixedLagSmoother>(config_.fixed_lag, parameters);
+
+    if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+        batchFixedLagSmoother_ = std::make_shared<gtsam::BatchFixedLagSmoother>(config_.fixed_lag);
+    }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+        gtsam::ISAM2Params parameters;
+        parameters.relinearizeThreshold = 0.0; // Set the relin threshold to zero such that the batch estimate is recovered
+        parameters.relinearizeSkip = 1; // Relinearize every time  
+        isam2FixedLagSmoother_ = std::make_shared<gtsam::IncrementalFixedLagSmoother>(config_.fixed_lag, parameters);
+    }    
 
     gtsam::NonlinearFactorGraph newGraphFactors;
     graphFactors_ = newGraphFactors;
@@ -2251,55 +2997,114 @@ void Frontend::performFixedLagSmoothing()
     graphFactors_.add(imuFactor);
     if(debug_print_PreintegratedImuMeasurements_fg) preintImu.print("debug_print_PreintegratedImuMeasurements_fg");
     if(debug_print_imu_factor_fg) imuFactor.print("imuFactor: ");
+    imuPreintCovariance_log_ = imuIntegrator_->preintMeasCov(); // for logging
 
     // Add imu bias between factor
-    auto imuBiasFactor = gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(
-            B(key_-1), B(key_), gtsam::imuBias::ConstantBias(),
-            gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegrator_->deltaTij()) * noiseModelBetweenBias_));
+    gtsam::noiseModel::Diagonal::shared_ptr imuBiasNoise = gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegrator_->deltaTij()) * noiseModelBetweenBias_);
+    auto imuBiasFactor = gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(B(key_-1), B(key_), gtsam::imuBias::ConstantBias(), imuBiasNoise);
+    // auto imuBiasFactor = gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(
+    //         B(key_-1), B(key_), gtsam::imuBias::ConstantBias(),
+    //         gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegrator_->deltaTij()) * noiseModelBetweenBias_));
     graphFactors_.add(imuBiasFactor); // imu bias factor just adds covariance with zero-mean between the previous bias and the current bias
     if(debug_print_imu_bias_factor_fg) imuBiasFactor.print("imuBiasFactor: ");
+    imuBiasCovariance_log_ = imuBiasNoise->covariance(); // for logging
 
     // Add LO between factor (or Prior factor for debugging)
     if(!config_.use_lo_prior_factor_wo_between_factor){
+        gtsam::BetweenFactor<gtsam::Pose3> lidarOdomFactor;
         // use lo between factor
-        gtsam::BetweenFactor<gtsam::Pose3> lidarOdomFactor(X(key_-1), X(key_), T_bPrevKf_bCurrKf_lo_, correctionNoise_); // this correctionNoise should be based on ICP score
+        if(config_.fix_lidar_odom_covariance){
+            // gtsam::BetweenFactor<gtsam::Pose3> lidarOdomFactor(X(key_-1), X(key_), T_bPrevKf_bCurrKf_lo_, constLidarOdomNoise_); // this correctionNoise should be based on ICP score
+            lidarOdomFactor = gtsam::BetweenFactor<gtsam::Pose3>(X(key_-1), X(key_), T_bPrevKf_bCurrKf_lo_, constLidarOdomNoise_);
+        } else {
+            lidarOdomFactor = gtsam::BetweenFactor<gtsam::Pose3>(X(key_-1), X(key_), T_bPrevKf_bCurrKf_lo_, lidarOdomNoise_);
+            // gtsam::BetweenFactor<gtsam::Pose3> lidarOdomFactor(X(key_-1), X(key_), T_bPrevKf_bCurrKf_lo_, lidarOdomNoise_);
+        }
         graphFactors_.add(lidarOdomFactor);
         if(debug_print_lo_factor_fg) lidarOdomFactor.print("lidarOdomFactor: ");
     }else{
         // use lo prior factor
-        gtsam::Pose3 poseCurrLO;
-        getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
-        gtsam::PriorFactor<gtsam::Pose3> lidarOdomFactor(X(key_), poseCurrLO ,correctionNoise_); // this correctionNoise should be based on ICP score
+        // gtsam::Pose3 poseCurrLO;
+        // getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
+        // gtsam::PriorFactor<gtsam::Pose3> lidarOdomFactor(X(key_), poseCurrLO ,constLidarOdomNoise_); // this correctionNoise should be based on ICP score
+        gtsam::PriorFactor<gtsam::Pose3> lidarOdomFactor;
+        getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, T_w_bCurrKf_lo_);
+        if(config_.fix_lidar_odom_covariance){
+            // gtsam::PriorFactor<gtsam::Pose3> lidarOdomFactor(X(key_), T_w_bCurrKf_lo_ ,constLidarOdomNoise_); // this correctionNoise should be based on ICP score
+            lidarOdomFactor = gtsam::PriorFactor<gtsam::Pose3>(X(key_), T_w_bCurrKf_lo_ ,constLidarOdomNoise_);
+        } else {
+            // gtsam::PriorFactor<gtsam::Pose3> lidarOdomFactor(X(key_), T_w_bCurrKf_lo_, lidarOdomNoise_);
+            lidarOdomFactor = gtsam::PriorFactor<gtsam::Pose3>(X(key_), T_w_bCurrKf_lo_, lidarOdomNoise_);
+        }
         graphFactors_.add(lidarOdomFactor);
         if(debug_print_lo_factor_fg) lidarOdomFactor.print("lidarOdomFactor: ");
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        RCLCPP_INFO_STREAM(get_logger(), "T_w_bCurrKf_lo_: " << T_w_bCurrKf_lo_);
     }
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    RCLCPP_INFO_STREAM(get_logger(), "icpHessianLatest_log_: " << icpHessianLatest_log_);
+    RCLCPP_INFO_STREAM(get_logger(), "lidarOdomNoise_: " << lidarOdomNoise_);
+
+    if(config_.fix_lidar_odom_covariance){
+        lidarOdomCovariance_log_ = constLidarOdomNoise_->covariance(); // for logging
+    } else {
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        lidarOdomCovariance_log_ = lidarOdomNoise_->covariance(); // for logging
+    }
+
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    // NEED TO CHANGE
+    // Now we compute both lidar and imu -based init guess for the current keyframe for debugging and analysis
+    // But eventually we need to compute only one of them to save computation
+    // init guess based on lidar
+    gtsam::Pose3 poseCurrLO;
+    getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
+    Eigen::Vector3d bP_v_bPrevKf_bCurrKf_lo = t_bPrevKf_bCurrKf_lo_ / (timeCurrScanEnd_ - timePrevScanEnd_);
+    Eigen::Vector3d w_v_bPrevKf_bCurrKf_lo = q_w_bPrevKf_ * bP_v_bPrevKf_bCurrKf_lo;
+    gtsam::Velocity3 velCurrLO = w_v_bPrevKf_bCurrKf_lo; // this should be in world frame
+    stateCurrKf_initGuess_lo_log_ = gtsam::NavState(poseCurrLO, velCurrLO);
+    biasCurrKf_initGuess_lo_log_ = biasPrevKf_;
+    // init guess based on imu (also compute imu propagated relative pose for debugging)
+    gtsam::NavState stateCurrKfProp;
+    if(imuIntegrator_->deltaTij() > TIME_EPS){
+        stateCurrKfProp = imuIntegrator_->predict(statePrevKf_, biasPrevKf_);
+        stateCurrKf_initGuess_imu_log_ = stateCurrKfProp;
+        biasCurrKf_initGuess_imu_log_ = biasPrevKf_;
+        Eigen::Vector3d t_w_bCurrKf_imu;
+        Eigen::Quaterniond q_w_bCurrKf_imu;
+        getEigenFromGtsam(stateCurrKfProp, q_w_bCurrKf_imu, t_w_bCurrKf_imu);
+        Eigen::Quaterniond q_bPrevKf_bCurrKf_imu = (q_w_bPrevKf_.inverse() * q_w_bCurrKf_imu).normalized();
+        Eigen::Vector3d t_bPrevKf_bCurrKf_imu = q_w_bPrevKf_.inverse() * (t_w_bCurrKf_imu - t_w_bPrevKf_);
+        getGtsamFromEigen(q_bPrevKf_bCurrKf_imu, t_bPrevKf_bCurrKf_imu, T_bPrevKf_bCurrKf_imu_log_);
+    }
+
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // Set initial values for the new keyframe state
     if (config_.factor_graph_init_guess_source == "lidar"){
-        gtsam::Pose3 poseCurrLO;
-        getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
+        // gtsam::Pose3 poseCurrLO;
+        // getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
         graphValues_.insert(X(key_), poseCurrLO);
 
-        Eigen::Vector3d bP_v_bPrevKf_bCurrKf_lo = t_bPrevKf_bCurrKf_lo_ / (timeCurrScanEnd_ - timePrevScanEnd_);
-        Eigen::Vector3d w_v_bPrevKf_bCurrKf_lo = q_w_bPrevKf_ * bP_v_bPrevKf_bCurrKf_lo;
-        gtsam::Velocity3 velCurrLO = w_v_bPrevKf_bCurrKf_lo; // this should be in world frame
+        // Eigen::Vector3d bP_v_bPrevKf_bCurrKf_lo = t_bPrevKf_bCurrKf_lo_ / (timeCurrScanEnd_ - timePrevScanEnd_);
+        // Eigen::Vector3d w_v_bPrevKf_bCurrKf_lo = q_w_bPrevKf_ * bP_v_bPrevKf_bCurrKf_lo;
+        // gtsam::Velocity3 velCurrLO = w_v_bPrevKf_bCurrKf_lo; // this should be in world frame
         graphValues_.insert(V(key_), velCurrLO);
 
-        posCurrKf_initGuess_ = poseCurrLO;  // for logging
-        velCurrKf_initGuess_ = velCurrLO;
     }else if(config_.factor_graph_init_guess_source == "imu" && imuIntegrator_->deltaTij() > TIME_EPS){
-        gtsam::NavState stateCurrKfProp = imuIntegrator_->predict(statePrevKf_, biasPrevKf_);
+        // gtsam::NavState stateCurrKfProp = imuIntegrator_->predict(statePrevKf_, biasPrevKf_);
         graphValues_.insert(X(key_), stateCurrKfProp.pose());
         graphValues_.insert(V(key_), stateCurrKfProp.velocity());
 
-        posCurrKf_initGuess_ = stateCurrKfProp.pose();  // for logging
-        velCurrKf_initGuess_ = stateCurrKfProp.velocity();
         if(debug_print_imu_prop_state_fg) RCLCPP_INFO_STREAM(get_logger(), "imu propagated current state: " << stateCurrKfProp);
     }else 
         RCLCPP_INFO_STREAM(get_logger(), "config_.factor_graph_init_guess_source is not properly set. Skip setting init guess for the current KF state in factor graph.");
     
     graphValues_.insert(B(key_), biasPrevKf_);
-    biasCurrKf_initGuess_ = biasPrevKf_;  // for logging
+
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // Set the measured time for each key(X,V,B), following gtsam_4-3/examples/FixedLagSmootherExample.cpp
     keyTimestamps_[X(key_)] = timeCurrScanEnd_;  // it should align with the scan ending time 
@@ -2308,14 +3113,41 @@ void Frontend::performFixedLagSmoothing()
 
     if(debug_print_num_factors_values){
         // Print some intermediate statistics: from IncrementalFixedLagSmootherExample.cpp
-        std::cout << "Before update - Graph has " << fixedLagSmoother_->getFactors().size() << " factors, " << fixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
-        std::cout << "New factors: " << graphFactors_.size() << ", New values: " << graphFactors_.size() << std::endl;
+        // std::cout << "Before update - Graph has " << batchFixedLagSmoother_->getFactors().size() << " factors, " << batchFixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+        // std::cout << "New factors: " << graphFactors_.size() << ", New values: " << graphFactors_.size() << std::endl;
+
+        // std::cout << "Before update - Graph has " << isam2FixedLagSmoother_->getFactors().size() << " factors, " << isam2FixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+        // std::cout << "New factors: " << graphFactors_.size() << ", New values: " << graphFactors_.size() << std::endl;
+
+        if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+            std::cout << "Before update - Graph has " << batchFixedLagSmoother_->getFactors().size() << " factors, " << batchFixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+            std::cout << "New factors: " << graphFactors_.size() << ", New values: " << graphFactors_.size() << std::endl;
+        }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+            std::cout << "Before update - Graph has " << isam2FixedLagSmoother_->getFactors().size() << " factors, " << isam2FixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+            std::cout << "New factors: " << graphFactors_.size() << ", New values: " << graphFactors_.size() << std::endl;
+        }
     }
+
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
     // Solve the optimization
     bool success = false;
     try {
-        fixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);     // following gtsam_4-3/examples/FixedLagSmootherExample.cpp
+        // batchFixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);     // following gtsam_4-3/examples/FixedLagSmootherExample.cpp
+        // isam2FixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+        // for(size_t i = 1; i < 2; ++i) { // Optionally perform multiple iSAM2 iterations
+        //     isam2FixedLagSmoother_->update();
+        // }
+
+        if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+            batchFixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);     // following gtsam_4-3/examples/FixedLagSmootherExample.cpp
+        }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+            isam2FixedLagSmoother_->update(graphFactors_, graphValues_, keyTimestamps_);
+            for(size_t i = 1; i < 2; ++i) { // Optionally perform multiple iSAM2 iterations
+                isam2FixedLagSmoother_->update();
+            }
+        }      
+
         // any parameters for fixedLagSmoother?
         success = true;
     } catch (const gtsam::IndeterminantLinearSystemException &) {
@@ -2325,20 +3157,44 @@ void Frontend::performFixedLagSmoothing()
 
     if(debug_print_num_factors_values){
         // you may not get expected results if you use the gtsam version lower than 4.3
-        std::cout << "After update - Graph has " << fixedLagSmoother_->getFactors().size()
-                << " factors, " << fixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
-                // size_t 	nrFactors () const -> return the number of non-null factors
+        // std::cout << "After update - Graph has " << batchFixedLagSmoother_->getFactors().size()
+        //         << " factors, " << batchFixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+        //         // size_t 	nrFactors () const -> return the number of non-null factors
+
+        // std::cout << "After update - Graph has " << isam2FixedLagSmoother_->getFactors().size()
+        //         << " factors, " << isam2FixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+        //         // size_t 	nrFactors () const -> return the number of non-null factors
+
+        if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+            std::cout << "After update - Graph has " << batchFixedLagSmoother_->getFactors().size()
+                    << " factors, " << batchFixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+                    // size_t 	nrFactors () const -> return the number of non-null factors
+        }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+            std::cout << "After update - Graph has " << isam2FixedLagSmoother_->getFactors().size()
+                    << " factors, " << isam2FixedLagSmoother_->getFactors().nrFactors() << " nr factors." << std::endl;
+                    // size_t 	nrFactors () const -> return the number of non-null factors
+        }  
     }
 
-    // Clear the factors and values
-    graphFactors_.resize(0);
-    graphValues_.clear();
-    keyTimestamps_.clear();
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+    // // Clear the factors and values
+    // graphFactors_.resize(0);
+    // graphValues_.clear();
+    // keyTimestamps_.clear();
 
     // Update the previous state
     if (success) {
-        gtsam::Values result = fixedLagSmoother_->calculateEstimate();
-        // If only a single variable is needed, it is faster to call calculateEstimate(const KEY&).
+        // gtsam::Values result = batchFixedLagSmoother_->calculateEstimate();
+        // // If only a single variable is needed, it is faster to call calculateEstimate(const KEY&).
+        // gtsam::Values result = isam2FixedLagSmoother_->calculateEstimate();
+
+        gtsam::Values result;
+        if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+            result = batchFixedLagSmoother_->calculateEstimate();
+        }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+            result = isam2FixedLagSmoother_->calculateEstimate();
+        }  
 
         // RCLCPP_INFO(this->get_logger(), "fixedLagKey:  %d", fixedLagKey);
         // RCLCPP_INFO(this->get_logger(), "result.size():  %ld", result.size());
@@ -2350,7 +3206,45 @@ void Frontend::performFixedLagSmoothing()
         biasCurrKf_ = result.at<gtsam::imuBias::ConstantBias>(B(key_));
         stateCurrKf_ = gtsam::NavState(posCurrKf, velCurrKf);
 
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        result.print();
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        graphFactors_.print();
+
+        gtsam::NonlinearFactorGraph fullGraph;
+        if (config_.fixed_lag_smoother_batch_or_incremental == "batch") {
+            fullGraph = batchFixedLagSmoother_->getFactors();
+        } else {
+            fullGraph = isam2FixedLagSmoother_->getFactors();
+        }
+
+        // Should be in this way
+        // For now, state covariance does not work so well for some reason.
+        // We can try:
+        //  - ImuFactor2
+        //  - CombinedImuFactor
+        //  - tuning LM parameters
+        //  - tuning fixed_lag range
+        //  But none of them have anything to do with graphFactors_ and result
+        //  So, there would be something wrong with factors and results themselves
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        // update the latest state covariance
+        gtsam::Marginals marginals(fullGraph, result);
+        // gtsam::Marginals marginals(graphFactors_, result, gtsam::Marginals::QR);
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+        stateCovCurrKf_.topLeftCorner<6,6>() = marginals.marginalCovariance(X(key_));
+        stateCovCurrKf_.bottomRightCorner<3,3>() = marginals.marginalCovariance(V(key_));
+
+        // stateCovCurrKf_ = marginals.marginalCovariance(X(key_));
+        // ref: /home/ysugano/code_review/gtsam_4-3/examples/OdometryExample.cpp
+
+        // So for now, just set the current state covariance as the initial state covariance and move on
+        // stateCovCurrKf_.topLeftCorner<6,6>() = priorPoseNoise_->covariance();
+        // stateCovCurrKf_.bottomRightCorner<3,3>() = priorVelNoise_->covariance();
+
         // imuIntegrator_->resetIntegrationAndSetBias(biasCurrKf_);
+
+RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
         // update the current state estimate(q_w_bCurrKf_, t_w_bCurrKf_) with FG estimation
         getEigenFromGtsam(stateCurrKf_, q_w_bCurrKf_, t_w_bCurrKf_);
@@ -2372,8 +3266,21 @@ void Frontend::performFixedLagSmoothing()
             RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
             // RCLCPP_INFO_STREAM(get_logger(), "poseCurrKf_: " << poseCurrKf_);
             RCLCPP_INFO_STREAM(get_logger(), "stateCurrKf_.pose(): " << stateCurrKf_.pose());
-            for(const gtsam::FixedLagSmoother::KeyTimestampMap::value_type& key_timestamp: fixedLagSmoother_->timestamps()) {
-                std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << "    Key: " << key_timestamp.first << "  Time: " << key_timestamp.second << std::endl;  // smootherBatch.timestamps() -> key_timestamp
+            // for(const gtsam::FixedLagSmoother::KeyTimestampMap::value_type& key_timestamp: batchFixedLagSmoother_->timestamps()) {
+            //     std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << "    Key: " << key_timestamp.first << "  Time: " << key_timestamp.second << std::endl;  // smootherBatch.timestamps() -> key_timestamp
+            // }
+
+            // for(const gtsam::FixedLagSmoother::KeyTimestampMap::value_type& key_timestamp: isam2FixedLagSmoother_->timestamps()) {
+            //     std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << "    Key: " << key_timestamp.first << "  Time: " << key_timestamp.second << std::endl;  // smootherBatch.timestamps() -> key_timestamp
+            // }
+            if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+                for(const gtsam::FixedLagSmoother::KeyTimestampMap::value_type& key_timestamp: batchFixedLagSmoother_->timestamps()) {
+                    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << "    Key: " << key_timestamp.first << "  Time: " << key_timestamp.second << std::endl;  // smootherBatch.timestamps() -> key_timestamp
+                }
+            }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+                for(const gtsam::FixedLagSmoother::KeyTimestampMap::value_type& key_timestamp: isam2FixedLagSmoother_->timestamps()) {
+                    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10) << "    Key: " << key_timestamp.first << "  Time: " << key_timestamp.second << std::endl;  // smootherBatch.timestamps() -> key_timestamp
+                }
             }
         }
     }else{
@@ -2383,29 +3290,18 @@ void Frontend::performFixedLagSmoothing()
         return;
     }
 
-    key_++;
-    // isFirstSmoothingDone_ = true;
+    // Clear the factors and values
+    graphFactors_.resize(0);
+    graphValues_.clear();
+    keyTimestamps_.clear();
 
-    // [TODO]
-    //  log the following parameters for debugging
-    //      - key id
-    //      - current scan end time, previous scan end time
-    //      - LO between factor (relative transformation)
-    //      - IMU between factor (relative transformation)
-    //      - initital value for X,V,B at the current key
-    //      - optimized value for X,V,B at the current key
+    key_++;
 }
 
 void Frontend::logRelativePoseEstimateEachSensor()
 {
     stateLogger_.recordState("Lidar", timeCurrScanBeg_, q_bPrevKf_bCurrKf_lo_, t_bPrevKf_bCurrKf_lo_);
     // stateLogger_.recordState("Lidar", timeCurrScanEnd_, q_bPrevKf_bCurrKf_lo_, t_bPrevKf_bCurrKf_lo_);
-
-    // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-    // RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanBeg_: " << std::fixed << timeCurrScanBeg_);
-    // RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_: " << std::fixed << timeCurrScanEnd_);
-    // RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_lo_: " << q_bPrevKf_bCurrKf_lo_);
-    // RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_lo_: " << t_bPrevKf_bCurrKf_lo_.transpose());
 
     // gtsam::NavState identity;
     // gtsam::NavState imuPropState = imuIntegrator_->predict(identity, biasPrevKf_);
@@ -2420,106 +3316,145 @@ void Frontend::logRelativePoseEstimateEachSensor()
     stateLogger_.recordState("Imu", timeCurrScanBeg_, q_bPrevKf_bCurrKf_imu, t_bPrevKf_bCurrKf_imu);
 }
 
-// void Frontend::logFactorGraphState(const gtsam::Pose3& initGuessPos, const gtsam::Velocity3& initGuessVel, const gtsam::imuBias::ConstantBias& initGuessBias)
 void Frontend::logFactorGraphState()
 {
-    // stateLogger_.recordState("Lidar", timeCurrScanBeg_, q_bPrevKf_bCurrKf_lo_, t_bPrevKf_bCurrKf_lo_);
-    // // stateLogger_.recordState("Lidar", timeCurrScanEnd_, q_bPrevKf_bCurrKf_lo_, t_bPrevKf_bCurrKf_lo_);
-
-    // // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-    // // RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanBeg_: " << std::fixed << timeCurrScanBeg_);
-    // // RCLCPP_INFO_STREAM(get_logger(), "timeCurrScanEnd_: " << std::fixed << timeCurrScanEnd_);
-    // // RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_lo_: " << q_bPrevKf_bCurrKf_lo_);
-    // // RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_lo_: " << t_bPrevKf_bCurrKf_lo_.transpose());
-
-    // // gtsam::NavState identity;
-    // // gtsam::NavState imuPropState = imuIntegrator_->predict(identity, biasPrevKf_);
-    // gtsam::NavState imuPropStateCurrKf = imuIntegrator_->predict(statePrevKf_, biasPrevKf_);
-    // // Also need to convert it to a realtive pose in W
-    // Eigen::Vector3d t_w_bCurrKf_imu;
-    // Eigen::Quaterniond q_w_bCurrKf_imu;
-    // getEigenFromGtsam(imuPropStateCurrKf, q_w_bCurrKf_imu, t_w_bCurrKf_imu);
-    // Eigen::Quaterniond q_bPrevKf_bCurrKf_imu = (q_w_bPrevKf_.inverse() * q_w_bCurrKf_imu).normalized();
-    // Eigen::Vector3d t_bPrevKf_bCurrKf_imu = q_w_bPrevKf_.inverse() * (t_w_bCurrKf_imu - t_w_bPrevKf_);
- 
-    // stateLogger_.recordState("Imu", timeCurrScanBeg_, q_bPrevKf_bCurrKf_imu, t_bPrevKf_bCurrKf_imu);
-
     if (!isStateInitialized_) return;
 
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
     double keyframeTimestamp = 0.0;
-    if(!fixedLagSmoother_->timestamps().empty()){
-        keyframeTimestamp = std::prev(fixedLagSmoother_->timestamps().end())->first;
+    // if(!batchFixedLagSmoother_->timestamps().empty()){
+    //     keyframeTimestamp = std::prev(batchFixedLagSmoother_->timestamps().end())->second;
+    //     RCLCPP_INFO_STREAM(get_logger(), "batchFixedLagSmoother_->timestamps().begin()->first: " << batchFixedLagSmoother_->timestamps().begin()->first);
+    //     RCLCPP_INFO_STREAM(get_logger(), "std::prev(batchFixedLagSmoother_->timestamps().end())->first: " << std::prev(batchFixedLagSmoother_->timestamps().end())->first);
+    // }
+
+    // if(!isam2FixedLagSmoother_->timestamps().empty()){
+    //     keyframeTimestamp = std::prev(isam2FixedLagSmoother_->timestamps().end())->second;
+    //     RCLCPP_INFO_STREAM(get_logger(), "isam2FixedLagSmoother_->timestamps().begin()->first: " << isam2FixedLagSmoother_->timestamps().begin()->first);
+    //     RCLCPP_INFO_STREAM(get_logger(), "std::prev(isam2FixedLagSmoother_->timestamps().end())->first: " << std::prev(isam2FixedLagSmoother_->timestamps().end())->first);
+    // }
+
+    if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+        if(!batchFixedLagSmoother_->timestamps().empty()){
+            keyframeTimestamp = std::prev(batchFixedLagSmoother_->timestamps().end())->second;
+            RCLCPP_INFO_STREAM(get_logger(), "batchFixedLagSmoother_->timestamps().begin()->first: " << batchFixedLagSmoother_->timestamps().begin()->first);
+            RCLCPP_INFO_STREAM(get_logger(), "std::prev(batchFixedLagSmoother_->timestamps().end())->first: " << std::prev(batchFixedLagSmoother_->timestamps().end())->first);
+        }
+    }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+        if(!isam2FixedLagSmoother_->timestamps().empty()){
+            keyframeTimestamp = std::prev(isam2FixedLagSmoother_->timestamps().end())->second;
+            RCLCPP_INFO_STREAM(get_logger(), "isam2FixedLagSmoother_->timestamps().begin()->first: " << isam2FixedLagSmoother_->timestamps().begin()->first);
+            RCLCPP_INFO_STREAM(get_logger(), "std::prev(isam2FixedLagSmoother_->timestamps().end())->first: " << std::prev(isam2FixedLagSmoother_->timestamps().end())->first);
+        }
     }
-    
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
 
-    gtsam::Pose3 poseCurrLO;
-    getGtsamFromEigen(q_w_bCurrKf_, t_w_bCurrKf_, poseCurrLO);
-
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-    gtsam::NavState imuPropStateCurrKf;
-    Eigen::Vector3d t_w_bCurrKf_imu;
-    Eigen::Quaterniond q_w_bCurrKf_imu;
-    if(imuIntegrator_->deltaTij() > TIME_EPS){
-        imuPropStateCurrKf = imuIntegrator_->predict(statePrevKf_, biasPrevKf_);
+    double timeImuBeg = 0.0;
+    double timeImuEnd = 0.0;
+    if (!imuPoseTimeline_.empty()){
+        timeImuBeg = imuPoseTimeline_.begin()->first;
+        timeImuEnd = std::prev(imuPoseTimeline_.end())->first;
     }
-    getEigenFromGtsam(imuPropStateCurrKf, q_w_bCurrKf_imu, t_w_bCurrKf_imu);
-    Eigen::Quaterniond q_bPrevKf_bCurrKf_imu = (q_w_bPrevKf_.inverse() * q_w_bCurrKf_imu).normalized();
-    Eigen::Vector3d t_bPrevKf_bCurrKf_imu = q_w_bPrevKf_.inverse() * (t_w_bCurrKf_imu - t_w_bPrevKf_);
-    gtsam::Pose3 T_bPrevKf_bCurrKf_imu;
-    getGtsamFromEigen(q_bPrevKf_bCurrKf_imu, t_bPrevKf_bCurrKf_imu, T_bPrevKf_bCurrKf_imu);
 
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    // Eigen::MatrixXd imuPreintCovariance = Eigen::MatrixXd::Identity(9, 9);
+    // Eigen::MatrixXd imuBiasCovariance = Eigen::MatrixXd::Identity(6, 6);
+    // if(imuIntegrator_->deltaTij() > TIME_EPS){
+    //     imuPreintCovariance = imuIntegrator_->preintMeasCov();
+    //     imuBiasCovariance = *gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegrator_->deltaTij()) * noiseModelBetweenBias_);
+    // }
 
-    gtsam::NavState initGuessStateCurrKf(posCurrKf_initGuess_, velCurrKf_initGuess_);
+    size_t numKeyframes = 0;
+    // numKeyframes = batchFixedLagSmoother_->timestamps().size();
+    // numKeyframes = isam2FixedLagSmoother_->timestamps().size();
 
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    if(config_.fixed_lag_smoother_batch_or_incremental == "batch"){
+        numKeyframes = batchFixedLagSmoother_->timestamps().size();
+    }else if(config_.fixed_lag_smoother_batch_or_incremental == "incremental"){
+        numKeyframes = isam2FixedLagSmoother_->timestamps().size();
+    }
 
     fgStateLogger_.recordFGState(
-        keyframeTimestamp,       // const double& keyframeTimestamp,
+        keyframeTimestamp,                              // const double& keyframeTimestamp,
         timeCurrScanBeg_,                               // const double& timeCurrScanBeg,
         timeCurrScanEnd_,                               // const double& timeCurrScanEnd,
-        imuPoseTimeline_.begin()->first,                // const double& timeImuBeg,
-        std::prev(imuPoseTimeline_.end())->first,      // const double& timeImuEnd,
+        timeImuBeg,                                     // const double& timeImuBeg,
+        timeImuEnd,                                     // const double& timeImuEnd,
         key_,                                           // const int& keyFrameId,
         T_bPrevKf_bCurrKf_lo_,                          // const gtsam::Pose3& lidarBetweenFactor,
-        poseCurrLO,                                     // const gtsam::Pose3& lidarPriorFactor,
-        T_bPrevKf_bCurrKf_imu,                          // const gtsam::Pose3& imuBetweenFactor,
+        T_w_bCurrKf_lo_,                                     // const gtsam::Pose3& lidarPriorFactor,
+        lidarOdomCovariance_log_,                                // const Eigen::MatrixXd& lidarOdomCovariance,
+        T_bPrevKf_bCurrKf_imu_log_,                          // const gtsam::Pose3& imuBetweenFactor,
+        imuPreintCovariance_log_,                            // const Eigen::MatrixXd& imuPreintCovariance,
+        imuBiasCovariance_log_,                              // const Eigen::MatrixXd& imuBiasCovariance,
         statePrevKf_,                                   // const gtsam::NavState& statePrevKf,
         biasPrevKf_,                                    // const gtsam::imuBias::ConstantBias& biasPrevKf,
-        initGuessStateCurrKf,                           // const gtsam::NavState& initGuessStateCurrKf,
-        biasCurrKf_initGuess_,                                  // const gtsam::imuBias::ConstantBias& initGuessBiasCurrKf,
+        stateCurrKf_initGuess_lo_log_,                           // const gtsam::NavState& stateCurrKf_initGuess_lo,
+        biasCurrKf_initGuess_lo_log_,                          // const gtsam::imuBias::ConstantBias& biasCurrKf_initGuess_lo,
+        stateCurrKf_initGuess_imu_log_,                           // const gtsam::NavState& stateCurrKf_initGuess_imu,
+        biasCurrKf_initGuess_imu_log_,                          // const gtsam::imuBias::ConstantBias& biasCurrKf_initGuess_imu,
+        stateCovPredCurrKf_imu_,
         stateCurrKf_,                                   // const gtsam::NavState& optimizedStateCurrKf,
         biasCurrKf_,                                    // const gtsam::imuBias::ConstantBias& optimizedBiasCurrKf,
-        fixedLagSmoother_->timestamps().size(),         // const int& numKeyframes,
-        isFGInitialized_                               // const bool& isFactorGraphOn,
+        stateCovCurrKf_,
+        // batchFixedLagSmoother_->timestamps().size(),         // const int& numKeyframes,
+        numKeyframes,
+        isFGInitialized_                                // const bool& isFactorGraphOn,
     );
-
-    RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
-
-    // void recordFGState(
-    //     const double& keyframeTimestamp,
-    //     const double& timeCurrScanBeg,
-    //     const double& timeCurrScanEnd,
-    //     const double& timeImuBeg,
-    //     const double& timeImuEnd,
-    //     const int& keyFrameId,
-    //     const gtsam::Pose3& lidarBetweenFactor,
-    //     const gtsam::Pose3& lidarPriorFactor,
-    //     const gtsam::Pose3& imuBetweenFactor,
-    //     const gtsam::NavState& statePrevKf,
-    //     const gtsam::imuBias::ConstantBias& biasPrevKf,
-    //     const gtsam::NavState& initGuessStateCurrKf,
-    //     const gtsam::imuBias::ConstantBias& initGuessBiasCurrKf,
-    //     const gtsam::NavState& optimizedStateCurrKf,
-    //     const gtsam::imuBias::ConstantBias& optimizedBiasCurrKf,
-    //     const int& numKeyframes,
-    //     const bool& isFactorGraphOn,
-    // )
 }
+
+
+void Frontend::computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation)
+{
+    // compute a scale correction by using median absolute deviation(MAD):
+    //  https://en.wikipedia.org/wiki/Median_absolute_deviation
+    if (mad_scale_estimation)
+    {
+        timeLogger_.start("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
+        double r_med = getMedianInPlace(r);      // X_bar = median(X)
+        Eigen::VectorXd absdev = (r.array() - r_med).abs();
+        double absdev_med = getMedianInPlace(absdev);    // MAD = median(|Xi - X_bar|)
+        s = 1.4826 * std::max(absdev_med, 1e-12);   // 1.4826 makes MAD ~ σ for Gaussian. Also 1e-12 caring numerical stability
+        timeLogger_.stop("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
+    }
+
+    // compute robust kernel weights for each residuals
+    //  ref: http://ceres-solver.org/nnls_modeling.html#instances
+    // We need to refine these robust kernel weight computations.
+    const double eps = 1e-12;
+    w.resize(r.size());  // r should be resized with the decleration
+    for (int i = 0; i < r.size(); ++i) 
+    {
+        double ri = r(i);
+        double u  = ri / std::max(s, eps);
+        double wi = 1.0;
+        if (kernel == "Huber")
+        {
+            c = 1.345; // gives 95% efficiency for Gaussian noise
+            double a = std::abs(u);
+            wi = (a <= c) ? 1.0 : (c / (a + eps));
+        }
+        else if (kernel == "Cauchy")
+        {
+            c = 3.0; // typically 2.0 - 4.0
+            double t = (u*u) / (c*c);
+            wi = 1.0 / (1.0 + t);
+        }
+        else if (kernel == "Tukey")
+        {
+            c = 4.5; // typically 4.5
+            double a = std::abs(u);
+            if (a <= c) 
+            {
+                double z = 1.0 - (u*u)/(c*c);
+                wi = z*z;
+            } 
+            else 
+            {
+                wi = 0.0;
+            }
+        }
+        w(i) = wi;
+    }
+}
+
 
 void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
 {
@@ -2531,9 +3466,10 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
         timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
     }
 
-    // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
-    t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
-    q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
+    // This is redundant because the current pose is updated with an Initial guess in setInitialPoseLO()
+    // // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    // t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
+    // q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
 
     if (debug_print_qp_active_set_init_guess)
     {
@@ -2544,12 +3480,30 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
     }
 
     Eigen::VectorXd x(6); // state vector (roll, pitch, yaw, tx, ty, tz)
+    // Eigen::VectorXd xPrev(6); // state vector (roll, pitch, yaw, tx, ty, tz)
+    x = Eigen::VectorXd::Zero(6);
+    // xPrev = Eigen::VectorXd::Zero(6);
+    Eigen::VectorXd x_icp(6);
+    x_icp = Eigen::VectorXd::Zero(6);
+    // icp iteration x_icp should take into account initial guess
+    // Sophus::SE3d T_icp(Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+    Sophus::SE3d T_icp(q_bPrevKf_bCurrKf_initGuess_.toRotationMatrix(), t_bPrevKf_bCurrKf_initGuess_);
+    Eigen::Vector<double, 6> a_icp = T_icp.log();
+    x_icp.head<3>() = a_icp.tail<3>();
+    x_icp.tail<3>() = a_icp.head<3>();
+
+    bool ineqConActivated = false;
 
     // ICP iteration (point-to-plane)
     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
     {
         if (debug_print_qp_icp_iter_num)
             RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
+
+        // moved to here to keep the last residual parameters for Hessian analysis
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
 
         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
         preparePointPlaneResidual();
@@ -2567,6 +3521,8 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             RCLCPP_INFO_STREAM(get_logger(), "num. of pts nn found: " << numPtsNnFound_);
             RCLCPP_INFO_STREAM(get_logger(), "num. of residual points: " << numResidual_);
         }
+
+        lm_lambda_ = config_.levenberg_marquardt_lambda_qp_active_set;
 
         // Non-linear optimization inner iteration (SQP)
         for (int iter_qp = 0; iter_qp < config_.sqp_iteration_num_qp_active_set; iter_qp++)
@@ -2770,30 +3726,82 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 RCLCPP_INFO_STREAM(get_logger(), "Hessian Computation is not defined well. Set Hessian to zero.");
             }
 
+            // Can we examine the damping term in Levenberg-Marquardt here?
             if(config_.turn_on_levenberg_marquardt_qp_active_set)
             {
                 timeLogger_.start("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
-                const double lambda = config_.levenberg_marquardt_lambda_qp_active_set;
+                // const double lambda = config_.levenberg_marquardt_lambda_qp_active_set;
                 if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping)
                 {
-                    HQP += 2.0 * lambda * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                    // HQP += 2.0 * lambda * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                    HQP += 2.0 * lm_lambda_ * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
                 }
                 else
                 {
-                    HQP += 2.0 * lambda * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                    // HQP += 2.0 * lambda * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                    HQP += 2.0 * lm_lambda_ * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
                 }
                 timeLogger_.stop("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
+
+                // This has been moved to after qpmad
+                // if(config_.levenberg_marquardt_trust_region_lambda_adjustment){
+                //     // Here we examine the step size, and adjust radius_(=1/lamdba_, following Ceres implementation)
+                //     // 1. solve the normal equation
+                //     // 2. compute the function decrease and step size quality
+                //     // 3. if step size quality is good -> widen the radius (smaller lambda) -> and go to the following step
+                //     //    if step size quality is bad  -> reduce the radius (larger lambda) 
+                //     const auto ATWA = 0.5 * HQP;
+                //     const auto ATWb = 0.5 * hQP;
+                //     const Eigen::VectorXd delta_x = ATWA.ldlt().solve(-ATWb);
+                //     const Eigen::VectorXd delta_x_scaledBack = D * delta_x;
+                //     const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6);
+                //     const double f = computeResidualWithDeltaX_OriginalObjective(x0, w);
+                //     // const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(delta_x, w);
+                //     const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(delta_x_scaledBack, w);
+                //     const double m = computeModelPredictedReduction(x0, ATWA, ATWb);
+                //     const double m_delta_x = computeModelPredictedReduction(delta_x, ATWA, ATWb);
+                //     // const double m_delta_x = computeModelPredictedReduction(delta_x_scaledBack, ATWA, ATWb);
+                //     const double rho = (f - f_delta_x) / (m - m_delta_x);
+
+                //     // update lambda in LM trust region depending on the step quality
+                //     if(rho < 0.25){     // if step size quality is bad  -> reduce the radius (larger lambda) 
+                //         lm_lambda_ = 2 * lm_lambda_;
+                //     }else if(rho > 0.75){   // if step size quality is good -> widen the radius (smaller lambda)
+                //         lm_lambda_ = std::max(lm_lambda_ / 1.414, config_.levenberg_marquardt_trust_region_lambda_min);
+                //     }
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          lm_lambda : " << lm_lambda_);
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]            delta_x : " << delta_x.transpose());
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] delta_x_scaledback : " << delta_x_scaledBack.transpose());
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  f : " << f);
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          f_delta_x : " << f_delta_x);
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  m : " << m);
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          m_delta_x : " << m_delta_x);
+                //     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]       step quality : " << rho);
+
+                //     // if the step is not good, reject it and go to the next iteration
+                //     if(rho < config_.levenberg_marquardt_trust_region_step_quality_threshold){
+                //         RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] step quality: " << rho << ", current step is rejected.");
+                //         continue;
+                //     }
+                // }
+
+                // We need to maintain lambda_ and decreas_factor_ in ceres implementation
+                //  or just maintain radius_ (or lambda_) in the textbook way
+
             }
             timeLogger_.stop("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
 
             // solution vector
             Eigen::VectorXd xQP(6); // solution vector (roll, pitch, yaw, tx, ty, tz)
+            xQP.setZero();
 
             // scaler inequality constraints
             Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
             Eigen::VectorXd ub(6);
-            if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints)
-            {
+
+            // we set a simple box constraint (lb, ub) here
+            // if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints)
+            if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "box"){
                 timeLogger_.start("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
                 // linear velocity from the 2nd previous frame to the previous frame, expressed in the body at the 2nd previous frame
                 const double linVel = t_bPrev2Kf_bPrevKf_.x() / (timePrevScanEnd_ - timePrev2ScanEnd_);
@@ -2822,8 +3830,7 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 //  One potential failure is that if the body z-axis does not align with the true yaw axis, the approximation would not hold
                 //  In that case, we need to perform and update a ground plane normal estimation and update body z-axis according to it.
 
-                for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
-                {
+                for (int i=0; i<6; ++i){   // initialize all the bounds as inf(no constraint essentially)
                     lb(i) = - std::numeric_limits<double>::max();
                     ub(i) = std::numeric_limits<double>::max();
                 }
@@ -2831,39 +3838,122 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 lb(2) = minYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);    // need to scale actually
                 ub(2) = maxYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
 
+                RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_: " << timePrevScanEnd_);
+                RCLCPP_INFO_STREAM(get_logger(), "timePrev2ScanEnd_: " << timePrev2ScanEnd_);
+                RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_ - timePrev2ScanEnd_: " << timePrevScanEnd_ - timePrev2ScanEnd_);
+                RCLCPP_INFO_STREAM(get_logger(), "lb(2): " << lb(2));
+                RCLCPP_INFO_STREAM(get_logger(), "ub(2): " << ub(2));
+
+                if(config_.qp_compute_ineq_from_imu_cov && !stateCovPredCurrKf_imu_.isApprox(Eigen::MatrixXd::Zero(9, 9))){
+                    const gtsam::Vector9 var = stateCovPredCurrKf_imu_.diagonal();
+                    const gtsam::Vector9 std = var.array().sqrt().matrix();
+
+                    // need to check the order of covariance matrix in gtsam::InvariantEKF
+                    // need to check std*sigma is correct?
+                    // it would be something like this:
+                    gtsam::Vector6 mean = gtsam::Pose3::Logmap(T_bPrevKf_bCurrKf_imu_log_);  // [Rx,Ry,Rz,Tx,Ty,Tz]
+                    lb(0) = mean(0) - std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    lb(1) = mean(1) - std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    lb(2) = mean(2) - std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    lb(3) = mean(3) - std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef; // std(4) - std(6) would be velocity -> see gtsam::InvariantEKF
+                    lb(4) = mean(4) - std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    lb(5) = mean(5) - std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(0) = mean(0) + std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(1) = mean(1) + std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(2) = mean(2) + std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(3) = mean(3) + std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(4) = mean(4) + std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                    ub(5) = mean(5) + std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+                }
+                // else{
+                //     // or we can use the degeneracy analysis result from the hessian of icp 
+                // }
+
                 // if using column-wise Jacobian scaling for numerical stability, we also have to scale the constraint
-                if(config_.turn_on_jacobian_column_scaling_qp_active_set)
-                {
+                if(config_.turn_on_jacobian_column_scaling_qp_active_set) {
                     Eigen::VectorXd d_inv = dj.cwiseInverse();
                     lb = lb.cwiseProduct(d_inv);
                     ub = ub.cwiseProduct(d_inv);
                 }
 
-                RCLCPP_INFO_STREAM(get_logger(), "lb(2): " << lb(2));
-                RCLCPP_INFO_STREAM(get_logger(), "ub(2): " << ub(2));
-
                 timeLogger_.stop("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
-            }
-            else 
-            {
+            } else {
                 // no constraints
                 lb = Eigen::VectorXd(); 
                 ub = Eigen::VectorXd();
             }
 
-            // linear inequality constraint (We don't enforce linear constraint for now)
+            // linear inequality constraint 
             Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd();
             Eigen::VectorXd Alb = Eigen::VectorXd();
             Eigen::VectorXd Aub = Eigen::VectorXd();
 
-            if (debug_print_qp_active_set_matrices_jacobian_residual)
-            {
+            // we set a general constraint (constrainedMatrix, Alb, Aub) here
+            if(config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "curvature"){
+                const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
+                const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
+                const double kappaMax = std::tan(maxStrAng) / whlbase;
+
+                // remember x = [rx, ry, rz, tx, ty, tz]T
+                // A x <= 0
+                // [ 0 0 -l tan(-phi_max) 0 0]  
+                // [ 0 0  l -tan(phi_max) 0 0] x <= 0
+                // [ 0 0  0            -1 0 0]
+                // equivalently:
+                // [ 0 0 -1 -kappa_max 0 0]  
+                // [ 0 0  1 -kappa_max 0 0] x <= 0
+                // [ 0 0  0         -1 0 0]
+
+                // This means:
+                // constraintMatrix * x <= 0
+
+                // Actually, it should be:
+                // constraintMatrix * (x + x_icp) <= 0
+                // , where x: the latest delta_x estimation in this inner loop, x_icp: total incremental delta_x estimation in this consecutive lidar frames so far
+                // So it should be:
+                // constraintMatrix * x <= -constraintMatrix * x_icp
+                // constraintMatrix * x <= Aub, where Aub = -constraintMatrix * x_icp
+                // Now that x is actually scaled:
+                //   constraintMatrix * D * (D^-1 x) <= Aub
+                //   constraintMatrix * D * z <= Aub, we are actually solving this z (=D^-1 x) (to be mapped back afterward)
+                //   constraintMatrix' * z <= Aub, where constraintMatrix' = constraintMatrix * D
+                // Thus, we have to scale constraintMatrix but we don't have to do that with Aub
+                constraintMatrix = Eigen::MatrixXd::Zero(3,6);
+                // constraintMatrix(0,2) = -whlbase;
+                // constraintMatrix(0,3) = std::tan(-maxStrAng);
+                // constraintMatrix(1,2) = whlbase;
+                // constraintMatrix(1,3) = -std::tan(maxStrAng);
+                constraintMatrix(0,2) = -1.0;
+                constraintMatrix(0,3) = -kappaMax;
+                constraintMatrix(1,2) = 1.0;
+                constraintMatrix(1,3) = -kappaMax;
+                constraintMatrix(2,3) = -1.0;
+
+                Alb = Eigen::VectorXd::Constant(3, -std::numeric_limits<double>::max());
+                // Aub = Eigen::VectorXd::Constant(3, 0.0);
+
+                // we are imposing constraint on the increment of 
+                // Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+                // auto a = T_icp.log();
+                // Eigen::Vector<double, 6> x_icp;
+                // x_icp.tail<3>() = a.head<3>(); // translation vector (x,y,z)
+                // x_icp.head<3>() = a.tail<3>(); // axis-angle vector (alpha, beta, gamma)
+                // x_icp is already updated via Log() map at the end of each SQP iteration
+
+                Aub = -constraintMatrix * x_icp;    // this is okay because x_icp is not scaled (already scaled back), constraintMatrix is not scaled
+
+                // we need to scale the constraintMatrix
+                if(config_.turn_on_jacobian_column_scaling_qp_active_set){
+                    constraintMatrix = constraintMatrix * D;
+                }
+            }
+
+            if (debug_print_qp_active_set_matrices_jacobian_residual){
                 RCLCPP_INFO_STREAM(get_logger(), "A: " << A);
                 RCLCPP_INFO_STREAM(get_logger(), "b: " << b);
             }
 
-            if (debug_print_qp_active_set_matrices)
-            {
+            if (debug_print_qp_active_set_matrices){
                 RCLCPP_INFO_STREAM(get_logger(), "HQP: ");
                 RCLCPP_INFO_STREAM(get_logger(), HQP);
                 RCLCPP_INFO_STREAM(get_logger(), "hQP: ");
@@ -2899,16 +3989,14 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             // [in] SolverParameters param – solver parameters, may be omitted
 
             // sanity check with Cholesky Decomposition linear solver
-            if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained)
-            {
+            if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained){
                 auto H_test = HQP / 2;
                 auto h_test = - hQP / 2;
                 xQP = H_test.ldlt().solve(-h_test);
             }
 
             // check optimization status
-            if (status != qpmad::Solver::OK)
-            {
+            if (status != qpmad::Solver::OK){
                 RCLCPP_INFO_STREAM(get_logger(), "Error in solving inequality constrained optimization problem with QPmad library.");
             }
 
@@ -2918,45 +4006,103 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
             qpmadSolver.getInequalityDual(dual, indices, is_lower);
 
-            if (debug_print_qp_active_set_solution_analysis)
-            {
-                if (dual.size() > 0)
-                {
+            if (debug_print_qp_active_set_solution_analysis){
+                if (dual.size() > 0){
+                    ineqConActivated = true;
+                    timeLogger_.start("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
                     RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
                     RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
-                    if (constraintMatrix.size() == 0) 
-                    {
+                    timeLogger_.stop("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
+
+                    if (constraintMatrix.size() == 0) {
                         RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
-                    } 
-                    else if (constraintMatrix.cols() != xQP.size()) 
-                    {
+                    } else if (constraintMatrix.cols() != xQP.size()) {
                         RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
-                    } 
-                    else 
-                    {
+                    } else {
                         RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * xQP).transpose());
                     }
+
                     // std::cout << constraintMatrix*xQP << std::endl;
                     // RCLCPP_INFO_STREAM(get_logger(), constraintMatrix*xQP);
                 }
             }
 
+            // log the constraints and if it was activated
+            // we have to scale the constraints back
+            // if(lb.size() != 0){
+            //     double forwardVel = t_bPrev2Kf_bPrevKf_.x() / (timePrevScanEnd_ - timePrev2ScanEnd_); // [m/s]
+            //     forwardVel = forwardVel * 3600 / 1000; // [km/h]
+            //     if(dual.size()!=0){
+            //         ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, forwardVel, lb(2)*dj(2) * (180/M_PI), ub(2)*dj(2) * (180/M_PI), true);
+            //     } else {
+            //         ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, forwardVel, lb(2)*dj(2) * (180/M_PI), ub(2)*dj(2) * (180/M_PI), false);
+            //     }
+            // }
+
             // scale the solution back if necessary
-            if (config_.turn_on_jacobian_column_scaling_qp_active_set)
-            {   
-                Eigen::VectorXd z = xQP;
+            Eigen::VectorXd z = Eigen::VectorXd::Zero(6);
+            if (config_.turn_on_jacobian_column_scaling_qp_active_set) {   
+                // Eigen::VectorXd z = xQP;
+                z = xQP;
                 //    z   = (D^-1 x) : scaled state vector (to be mapped back to x after solving QP)
                 // --- 5) Map back to original variables (unscale) ---
                 x = D * z;  // x = Dz
-            }
-            else
-            {
+            } else {
                 x = xQP;
             }
+            // xPrev = x;
+            // RCLCPP_INFO_STREAM(get_logger(), "[SQP]: result tx: " << x(3) << ", ty: " << x(4) << ", tz:" << x(5) << ", rx: " << x(0) << ", ry: " << x(1) << ", rz: " << x(2));
             timeLogger_.stop("[SQP]: Solve QP", __FUNCTION__, __LINE__);
 
-            if (debug_print_qp_active_set_solution)
-            {
+            // We examine the step size of the solution out of qpmad
+            if(config_.levenberg_marquardt_trust_region_lambda_adjustment){
+                if(!config_.turn_on_jacobian_column_scaling_qp_active_set) z = x;
+                // Here we examine the step size, and adjust radius_(=1/lamdba_, following Ceres implementation)
+                // 1. solve the normal equation
+                // 2. compute the function decrease and step size quality
+                // 3. if step size quality is good -> widen the radius (smaller lambda) -> and go to the following step
+                //    if step size quality is bad  -> reduce the radius (larger lambda) 
+                const auto ATWA = 0.5 * HQP;
+                const auto ATWb = 0.5 * hQP;
+                // const Eigen::VectorXd delta_x = ATWA.ldlt().solve(-ATWb);
+                // const Eigen::VectorXd delta_x_scaledBack = D * delta_x;
+                const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6);
+                const double f = computeResidualWithDeltaX_OriginalObjective(x0, w);
+                // const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(delta_x, w);
+                const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(x, w); // f should be based on the solution scaled back (x)
+                const double m = computeModelPredictedReduction(x0, ATWA, ATWb);
+                const double m_delta_x = computeModelPredictedReduction(z, ATWA, ATWb); // m (quadratic model) should be based on the solution scaled (z) because ATWA, ATWB are scaled
+                // const double m_delta_x = computeModelPredictedReduction(delta_x_scaledBack, ATWA, ATWb);
+                const double rho = (f - f_delta_x) / (m - m_delta_x);
+
+                // update lambda in LM trust region depending on the step quality
+                if(rho < 0.25){     // if step size quality is bad  -> reduce the radius (larger lambda) 
+                    lm_lambda_ = 2 * lm_lambda_;
+                }else if(rho > 0.75){   // if step size quality is good -> widen the radius (smaller lambda)
+                    lm_lambda_ = std::max(lm_lambda_ / 1.414, config_.levenberg_marquardt_trust_region_lambda_min);
+                }
+
+                if (debug_print_qp_levenberg_marquardt_adaptive_lambda){
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          lm_lambda : " << lm_lambda_);
+                    // RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]            delta_x : " << delta_x.transpose());
+                    // RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] delta_x_scaledback : " << delta_x_scaledBack.transpose());
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]            delta_x : " << z.transpose());
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] delta_x_scaledback : " << x.transpose());
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  f : " << f);
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          f_delta_x : " << f_delta_x);
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  m : " << m);
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          m_delta_x : " << m_delta_x);
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]       step quality : " << rho);
+                }
+
+                // if the step is not good, reject it and go to the next iteration
+                if(rho < config_.levenberg_marquardt_trust_region_step_quality_threshold){
+                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] step quality: " << rho << ", current step is rejected.");
+                    continue;
+                }
+            }
+
+            if (debug_print_qp_active_set_solution){
                 // for (unsigned int i=0; i<6; ++i)
                 // {
                 //     RCLCPP_INFO_STREAM(get_logger(), "xQP(" << i << "): " << xQP(i));
@@ -2965,8 +4111,7 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 // {
                 //     RCLCPP_INFO_STREAM(get_logger(), "xQPfloat(" << i << "): " << xQPfloat(i));
                 // }
-                for (unsigned int i=0; i<6; ++i)
-                {
+                for (unsigned int i=0; i<6; ++i){
                     RCLCPP_INFO_STREAM(get_logger(), "x(" << i << "): " << x(i));
                 }
             }
@@ -2981,16 +4126,11 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
             Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
 
-            if (config_.pose_increment_multiplication == "right")
-            {
+            if (config_.pose_increment_multiplication == "right"){
                 T = T * exp_x; // update by right multiplication
-            }
-            else if (config_.pose_increment_multiplication == "left")
-            {
+            } else if (config_.pose_increment_multiplication == "left"){
                 T = exp_x * T; // update by left multiplication
-            }
-            else
-            {
+            } else {
                 RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
             }
 
@@ -2999,76 +4139,392 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             t_w_bCurrKf_ = T.translation();
             timeLogger_.stop("[SQP]: Update solution pose", __FUNCTION__, __LINE__);
 
-            if (debug_print_qp_active_set_solution_pose_update)
-            {
+            if (debug_print_qp_active_set_solution_pose_update){
                 RCLCPP_INFO_STREAM(get_logger(), "t_delta: " << exp_x.translation());
                 RCLCPP_INFO_STREAM(get_logger(), "q_delta: " << Eigen::Quaterniond(exp_x.rotationMatrix()));
                 RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
                 RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
             }
 
+            // update pose increment for this consecutive lidar frame icp for computing curvature inequality constraints at the next iteration
+            // x_icp += x;
+            T_icp = T_icp * exp_x;
+            a_icp = T_icp.log();
+            x_icp.tail<3>() = a_icp.head<3>(); // axis-angle vector (alpha, beta, gamma)
+            x_icp.head<3>() = a_icp.tail<3>(); // translation vector (x,y,z)
+
         } // QP inner iteration (SQP)
 
+        // moved to the top to keep the last residual parameters for Hessian analysis
+        // pointScanCurrInBForResidual_.clear();
+        // planeNormalForResidual_.clear();
+        // planeDistFromOriginForResidual_.clear();
+    }
+
+    // log time
+    if(ineqConActivated){
+        ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, true);
+    } else {
+        ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, false);
+    }
+
+    // record the optimized twist
+    // twistLogger_.recordTwist(timeCurrScanBeg_, x(0)* (180/M_PI), x(1)* (180/M_PI), x(2)* (180/M_PI), x(3), x(4), x(5));
+    twistLogger_.recordTwist(timeCurrScanBeg_, x_icp(0)* (180/M_PI), x_icp(1)* (180/M_PI), x_icp(2)* (180/M_PI), x_icp(3), x_icp(4), x_icp(5));
+
+    // end of the point-to-plane icp with inequality constraints
+}
+
+void Frontend::solveLeastSquares_InequalityConstraints_BFGS()
+{
+    if(!config_.use_voxel_map)
+    {
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+    }
+
+    // // This is redundant because the current pose is updated with an Initial guess in setInitialPoseLO()
+    // // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    // t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
+    // q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
+
+    if (debug_print_qp_active_set_init_guess)
+    {
+        RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_initGuess_: " << t_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_initGuess_: " << q_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+    }
+
+    Eigen::VectorXd x(6); // state vector (roll, pitch, yaw, tx, ty, tz)
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        if (debug_print_qp_icp_iter_num)
+            RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // moved to here to keep the last residual parameters for Hessian analysis
         pointScanCurrInBForResidual_.clear();
         planeNormalForResidual_.clear();
         planeDistFromOriginForResidual_.clear();
 
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+        preparePointPlaneResidual();
+        timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // Set up parameters
+        LBFGSpp::LBFGSParam<double> param;
+        param.epsilon = 1e-6;
+        param.max_iterations = 100;
+
+        // Initial guess 
+        Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+        Eigen::VectorXd x = Eigen::VectorXd::Zero(6); // init guess of pose increment
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // Eigen::VectorXd x = T.log();
+        // x = T.log();
+
+        // Create solver and function object
+        LBFGSpp::LBFGSSolver<double> solver(param);
+        // PointToPlaneCostForLBFGSpp fun(numResidual_, pointScanCurrInBForResidual_, planeNormalForResidual_, planeDistFromOriginForResidual_);    
+        PointToPlaneCostForLBFGSpp fun(T, numResidual_, pointScanCurrInBForResidual_, planeNormalForResidual_, planeDistFromOriginForResidual_);       
+
+        RCLCPP_INFO_STREAM(get_logger(), "x: " << x);
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // x will be overwritten to be the best point found
+        double fx;
+        int niter = solver.minimize(fun, x, fx);
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        std::cout << niter << " iterations" << std::endl;
+        std::cout << "x = \n" << x.transpose() << std::endl;
+        std::cout << "f(x) = " << fx << std::endl;
+
+        // Map state vector x (6DoF) to a transformation matrix via exp map in Sophus
+        // reorder the state vector to adjust to Sophus twist 
+        Eigen::Vector<double, 6> a;
+        a.tail<3>() = x.head<3>(); // axis-angle vector (alpha, beta, gamma)
+        a.head<3>() = x.tail<3>(); // translation vector (x,y,z)
+        const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
+        // Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        if (config_.pose_increment_multiplication == "right")
+        {
+            T = T * exp_x; // update by right multiplication
+        }
+        else if (config_.pose_increment_multiplication == "left")
+        {
+            T = exp_x * T; // update by left multiplication
+        }
+        else
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
+        }
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        q_w_bCurrKf_ = Eigen::Quaterniond(T.rotationMatrix());
+        q_w_bCurrKf_.normalize();
+        t_w_bCurrKf_ = T.translation();
+
+        RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
     }
     // end of the point-to-plane icp with inequality constraints
 }
 
-void Frontend::computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation)
+
+void Frontend::solveLeastSquares_InequalityConstraints_IFOPT()
 {
-    // compute a scale correction by using median absolute deviation(MAD):
-    //  https://en.wikipedia.org/wiki/Median_absolute_deviation
-    if (mad_scale_estimation)
+    if(!config_.use_voxel_map)
     {
-        timeLogger_.start("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
-        double r_med = getMedianInPlace(r);      // X_bar = median(X)
-        Eigen::VectorXd absdev = (r.array() - r_med).abs();
-        double absdev_med = getMedianInPlace(absdev);    // MAD = median(|Xi - X_bar|)
-        s = 1.4826 * std::max(absdev_med, 1e-12);   // 1.4826 makes MAD ~ σ for Gaussian. Also 1e-12 caring numerical stability
-        timeLogger_.stop("[SQP]: Hessian Computation - Residual Median Calculation", __FUNCTION__, __LINE__);
+        // set the local map point cloud to the kd_tree to nearest neighbor search
+        timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+        kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+        timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
     }
 
-    // compute robust kernel weights for each residuals
-    //  ref: http://ceres-solver.org/nnls_modeling.html#instances
-    // We need to refine these robust kernel weight computations.
-    const double eps = 1e-12;
-    w.resize(r.size());  // r should be resized with the decleration
-    for (int i = 0; i < r.size(); ++i) 
+    // // This is redundant because the current pose is updated with an Initial guess in setInitialPoseLO()
+    // // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    // t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
+    // q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
+
+    if (debug_print_qp_active_set_init_guess)
     {
-        double ri = r(i);
-        double u  = ri / std::max(s, eps);
-        double wi = 1.0;
-        if (kernel == "Huber")
-        {
-            c = 1.345; // gives 95% efficiency for Gaussian noise
-            double a = std::abs(u);
-            wi = (a <= c) ? 1.0 : (c / (a + eps));
-        }
-        else if (kernel == "Cauchy")
-        {
-            c = 3.0; // typically 2.0 - 4.0
-            double t = (u*u) / (c*c);
-            wi = 1.0 / (1.0 + t);
-        }
-        else if (kernel == "Tukey")
-        {
-            c = 4.5; // typically 4.5
-            double a = std::abs(u);
-            if (a <= c) 
-            {
-                double z = 1.0 - (u*u)/(c*c);
-                wi = z*z;
-            } 
-            else 
-            {
-                wi = 0.0;
-            }
-        }
-        w(i) = wi;
+        RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_initGuess_: " << t_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_initGuess_: " << q_bPrevKf_bCurrKf_initGuess_);
+        RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+        RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
     }
+
+    Eigen::VectorXd x(6); // state vector (roll, pitch, yaw, tx, ty, tz)
+    // scaler inequality constraints
+    Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
+    Eigen::VectorXd ub(6);
+    
+    // no bound
+    // for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
+    // {
+    //     lb(i) = - std::numeric_limits<double>::max();
+    //     ub(i) = std::numeric_limits<double>::max();
+    // }
+
+    // put some realistic bound
+    // rotation
+    for (int i=0; i<3; ++i)   // initialize all the bounds as inf(no constraint essentially)
+    {
+        lb(i) = - 3.14 / 4; // [rad] = - 45 [deg]
+        ub(i) = 3.14 / 4;   // [rad] = + 45 [deg]
+    }
+    // translation
+    for (int i=3; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
+    {
+        lb(i) = - 2; // - 2 m
+        ub(i) = 2;   // + 2 m
+    }
+
+    // ICP iteration (point-to-plane)
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        if (debug_print_qp_icp_iter_num)
+            RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // moved to here to keep the last residual parameters for Hessian analysis
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+        preparePointPlaneResidual();
+        timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // Initial guess
+        Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_); // init guess of abs. pose
+        Eigen::VectorXd x = Eigen::VectorXd::Zero(6); // init guess of pose increment
+        // Initial guess starts from zero since we already compose q_w_bCurrKf_ and t_w_bCurrKf_ with init guesses
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // Eigen::VectorXd x = T.log();
+        // x = T.log();
+        
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        // ======== SOLVE ICP ITERATION WITH IFOPT ========  
+        // Define the solver independent problem
+        ifopt::Problem nlp;
+        auto twist = std::make_shared<TwistVariables>("twist");
+        twist->SetInitialVariables(x, lb, ub, T);
+        // twist->SetInitialVariables(x, T);
+        nlp.AddVariableSet(twist);
+        // check bounds
+        auto bounds = twist->GetBounds();
+        for (int i = 0; i < 6; ++i) {
+        std::cout << "twist[" << i << "] bounds = ["
+                    << bounds.at(i).lower_ << ", "
+                    << bounds.at(i).upper_ << "]\n";
+        }
+
+        // auto kinematicConstraint = std::make_shared<KinematicConstraint>("kinematic_constraint");
+        // kinematicConstraint->SetConstraints(lb, ub);
+        // nlp.AddConstraintSet(kinematicConstraint);
+
+        auto pointToPlaneCost = std::make_shared<PointPlaneCost>("point_to_plane_cost");
+        pointToPlaneCost->SetInitialPoseAndResidual(T, numResidual_, 
+                    pointScanCurrInBForResidual_, planeNormalForResidual_, planeDistFromOriginForResidual_);
+        nlp.AddCostSet(pointToPlaneCost);
+
+        // sanity check for gradient and cost        
+        Eigen::VectorXd x0 = twist->GetValues();
+        double c0;
+        Eigen::SparseMatrix<double, Eigen::RowMajor> J0;
+        // also compute the initial residual and fix the robust weights
+        pointToPlaneCost->ComputeCostAndJacobian(x0, c0, J0);
+        std::cout << "Initial cost: " << c0
+                << ", grad norm: " << Eigen::VectorXd(J0.transpose()).norm() << std::endl;
+
+        // Initialize solver and options: ref https://coin-or.github.io/Ipopt/OPTIONS.html
+        ifopt::IpoptSolver ipopt;
+        ipopt.SetOption("linear_solver", "mumps");
+        ipopt.SetOption("jacobian_approximation", "exact");   
+        // ipopt.SetOption("jacobian_approximation", "finite-difference-values");   
+        // ipopt.SetOption("gradient_approximation", "finite-difference-values");   
+        ipopt.SetOption("hessian_approximation", "limited-memory");  
+        // ipopt.SetOption("hessian_approximation", "exact");  
+        // ipopt.SetOption("nlp_scaling_method", "gradient-based");  
+
+        ipopt.SetOption("tol", 1e-4);
+        ipopt.SetOption("acceptable_tol", 1e-2);
+        ipopt.SetOption("max_iter", 50);
+        ipopt.SetOption("print_level", 5);
+
+        // ipopt.SetOption("derivative_test", "first-order");
+        // ipopt.SetOption("derivative_test_tol", 1e-4);
+
+
+        // Solve
+        ipopt.Solve(nlp);   
+        // std::cout << nlp.GetOptVariables()->GetValues().transpose() << std::endl;
+        RCLCPP_INFO_STREAM(get_logger(), "IFOPT SOLUTION: " << nlp.GetOptVariables()->GetValues().transpose());
+        // ======== SOLVE ICP ITERATION WITH IFOPT ======== 
+
+        x = nlp.GetOptVariables()->GetValues();
+
+        // Map state vector x (6DoF) to a transformation matrix via exp map in Sophus
+        // reorder the state vector to adjust to Sophus twist 
+        Eigen::Vector<double, 6> a;
+        a.tail<3>() = x.head<3>(); // axis-angle vector (alpha, beta, gamma)
+        a.head<3>() = x.tail<3>(); // translation vector (x,y,z)
+        const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
+        // Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        if (config_.pose_increment_multiplication == "right")
+        {
+            T = T * exp_x; // update by right multiplication
+        }
+        else if (config_.pose_increment_multiplication == "left")
+        {
+            T = exp_x * T; // update by left multiplication
+        }
+        else
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
+        }
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+
+        q_w_bCurrKf_ = Eigen::Quaterniond(T.rotationMatrix());
+        q_w_bCurrKf_.normalize();
+        t_w_bCurrKf_ = T.translation();
+
+        // RCLCPP_INFO_STREAM(get_logger(), __FUNCTION__ << __LINE__);
+    }
+    // end of the point-to-plane icp with inequality constraints
+}
+
+// void Frontend::evaluateStepSizeTrustRegionLM(Eigen::Matrix<double,6,6> JTJ, Eigen::Matrix<double,6,1> JTr, Eigen::VectorXd w)
+// {
+//     // solve delta_x = -(JTJ)JTr
+    
+//     // compute f(x)
+//     // compute f(x + delta_x)
+    
+//     // compute m(0) = f(x)
+//     // compute m(delta_x) = f(x) + J(x)*delta_x + 1/2*delta_x.T*(JTJ)*delta_x
+
+//     // compute step_quality: rho = (f(x)-f(x+delta_x))/(m(0)-m(delta_x))
+//     // 
+
+//     // from Ceres:
+//     // new_model_cost
+//     //  = 1/2 [f + J * step]^2
+//     //  = 1/2 [ f'f + 2f'J * step + step' * J' * J * step ]
+//     // model_cost_change
+//     //  = cost - new_model_cost
+//     //  = f'f/2  - 1/2 [ f'f + 2f'J * step + step' * J' * J * step]
+//     //  = -f'J * step - step' * J' * J * step / 2
+//     //  = -(J * step)'(f + J * step / 2)
+
+
+// }
+
+double Frontend::computeResidualWithDeltaX_OriginalObjective(Eigen::VectorXd delta_x, Eigen::VectorXd weights)
+{
+    const Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
+
+    Eigen::Vector<double, 6> a;
+    a.tail<3>() = delta_x.head<3>(); // axis-angle vector (alpha, beta, gamma)
+    a.head<3>() = delta_x.tail<3>(); // translation vector (x,y,z)
+
+    const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
+    const Sophus::SE3d Twb = T * exp_x;
+
+    const Eigen::Matrix3d Rwb = Twb.rotationMatrix();
+    const Eigen::Vector3d twb = Twb.translation();
+
+    double r2 = 0.0;
+    for (size_t i=0; i < numResidual_; ++i){
+        const Eigen::Vector3d wp = Rwb * pointScanCurrInBForResidual_.at(i) + twb;
+        const double r = planeNormalForResidual_.at(i).transpose() * wp + planeDistFromOriginForResidual_.at(i);
+        r2 += r * r * weights(i);
+    }
+    
+    return 0.5 * r2;
+}
+
+
+// double Frontend::computeModelPredictedReduction(Eigen::VectorXd delta_x, Eigen::Matrix<double,6,6> ATWA, Eigen::Matrix<double,6,1> ATWb)
+double Frontend::computeModelPredictedReduction(Eigen::Vector<double, 6> delta_x, Eigen::Matrix<double,6,6> ATWA, Eigen::Matrix<double,6,1> ATWb)
+{   
+    // HQP and hQP should be weighted already
+    // return 1/2 * delta_x.transpose() * ATWA * delta_x + ATWb.transpose() * delta_x;
+    return 0.5 * (delta_x.transpose() * ATWA * delta_x)(0,0) + (ATWb.transpose() * delta_x)(0,0);
 }
 
 } // namespace lo_dev

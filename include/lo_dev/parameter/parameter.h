@@ -122,6 +122,7 @@ extern bool debug_print_qp_active_set_solution_pose_update;
 extern bool debug_print_qp_icp_iter_num;
 extern bool debug_print_qp_sqp_iter_num;
 extern bool debug_try_qp_active_set_Cholesky_Decomposition_unconstrained;
+extern bool debug_print_qp_levenberg_marquardt_adaptive_lambda;
 
 
 // for initialization parameter

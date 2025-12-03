@@ -4,11 +4,14 @@
     # lidar_topic: "/sim_lidar/point_cloud"   # Isaac Sim
     # imu_topic: "/automine/imu"   # AutoMine
     # lidar_topic: "/automine/lidar"   # AutoMine
-    imu_topic: "/imu_raw"   # KITTI
+    # imu_topic: "/imu_raw"   # KITTI
+    imu_topic: "/imu"  # HeliPR
     # imu_topic: "/imu_correct"   # KITTI
-    lidar_topic: "/points_raw"   # KITTI
-    # sensor: "ouster"    # Isaac Sim, AutoMine
-    sensor: "velodyne"    # KITTI
+    # lidar_topic: "/points_raw"   # KITTI
+    lidar_topic: "/ouster/points"   # HeliPR
+    sensor: "ouster"    # Isaac Sim, AutoMine
+    # sensor: "velodyne"    # KITTI
+
     
     # world_frame: "map"
     # sensor_frame: "sensor"
@@ -22,9 +25,13 @@
     imu_acc_y_limit: 0.2
     imu_acc_z_limit: 0.4
 
+    use_sim_time: true
+
     frontend_node:
         # ---- for general ----
         set_main_process_timer: true # default: true
+        turn_off_pcl_conversion_error_printing: false # default: false, true for fast computation w/o error printing
+
 
         # ---- for voxel map ----
         use_voxel_map: true     # true: kiss-icp based voxel map / false: naive point cloud vector + pcl.kdtree search
@@ -45,23 +52,26 @@
         voxel_downsample_resolution_mapping_to_icpsource: 0.5    # One that went well (but slow) [current best]
         threshold_voxel_nn_search_radius: 1.67 # vehicle 60km/h=16.7m/sec, lidar scan 0.1fps, 16.7x0.1=1.67m
 
+
         # ---- for preprocesing ----
         scan_line: 32 
         lidar_min_range: 5.0
         filter_point_size: 3
         enable_min_range_filter: false
         lidar_scan_rate: 10.0 # [Hz] = [scan/sec] (not [line/sec])
-        point_cloud_msg_timestamp: "scan_end_time" # "scan_end_time" or "scan_beginning_time"
+        point_cloud_msg_timestamp: "scan_end_time" # "scan_end_time" or "scan_beginning_time", for velodyne cloud msg timestamps typically represent scan end time
+        print_sync_status: false
+
 
         # ---- for lidar odometry ----
         # max_iterations: 5
-        max_iterations: 25                # This is also important
+        max_iterations: 25                # max iterations for Ceres
         # max_iterations: 50              # This is also important [current best]
         # max_solver_time_in_seconds: 0.2   [current best]
         max_solver_time_in_seconds: 0.015     # 0.015 in liliom
         voxel_filter_size: 0.4      # pcl::voxelfiltersize()
         max_cloud_frame_for_local_map: 5
-        # icp_iteration_num: 10           # This is super important [current best] works but kind of slow
+        # icp_iteration_num: 15           # This is super important [current best] works but kind of slow
         # icp_iteration_num: 5              # 5 and 7 does not work
         icp_iteration_num: 20           # for QP active set, 20 sounds too many but runs in real-time pretty much
         use_liosam_gauss_newton: false
@@ -69,43 +79,79 @@
         build_local_map_from_all_global_map: false
         initial_guess_source: "imu"         # "imu" or "constant velocity"
         motion_compensation_source: "imu"   # "imu" or "constant velocity"
+        # initial_guess_source: "constant velocity"         # "imu" or "constant velocity"
+        # motion_compensation_source: "constant velocity"   # "imu" or "constant velocity"
         
         
         # ---- for factor graph ----
-        turn_on_factor_graph: true
-        lidar_correction_noise: 0.01
+        turn_on_factor_graph: false
+        lidar_correction_noise: 0.0001      # used with fix_lidar_odom_covariance: true
         acc_n: 3.9939570888238808e-03          # accelerometer measurement noise standard deviation. #0.2
         gyr_n: 1.5636343949698187e-03         # gyroscope measurement noise standard deviation.     #0.05
         acc_w: 6.4356659353532566e-05          # accelerometer bias random work noise standard deviation.  #0.02
         gyr_w: 3.5640318696367613e-05       # gyroscope bias random work noise standard deviation.     #4.0e-5
+        # acc_n: 0.01          # accelerometer measurement noise standard deviation. #0.2
+        # gyr_n: 0.01         # gyroscope measurement noise standard deviation.     #0.05
+        # acc_w: 0.01          # accelerometer bias random work noise standard deviation.  #0.02
+        # gyr_w: 0.01       # gyroscope bias random work noise standard deviation.     #4.0e-5
         g_norm: 9.80511    # 0 means you need to provide both imu-camera and laser-camera extrinsic
-        lag: 0.3
+        fixed_lag: 0.3
         use_lo_prior_factor_wo_between_factor: true
         factor_graph_init_guess_source: "lidar" # "lidar" or "imu" for the current kf init guess in FG
+        fixed_lag_smoother_batch_or_incremental: "incremental"
+        fix_lidar_odom_covariance: false  # false: use a covariance out of ICP Hessian
 
 
         # ---- for inequality constraints ----
-        turn_on_qp_ineq_constraints_active_set: false
-        turn_on_ineq_constraints: false
-        sqp_iteration_num_qp_active_set: 5
+        # turn_on_qp_ineq_constraints_active_set: false     # not really used anymore
+        turn_on_ineq_constraints: true
+        ineq_constraints_type: "curvature"      # "box" or "curvature"
+        sqp_iteration_num_qp_active_set: 3
+        # sqp_iteration_num_qp_active_set: 3
         turn_on_levenberg_marquardt_qp_active_set: true   # true: LM method, false: Gauss Netwon
-        levenberg_marquardt_lambda_qp_active_set: 1.0
+        levenberg_marquardt_lambda_qp_active_set: 1.0   # becomes an initial lambda if levenberg_marquardt_trust_region_lambda_adjustment: true
+        # levenberg_marquardt_lambda_qp_active_set: 1e-2   # becomes an initial lambda if levenberg_marquardt_trust_region_lambda_adjustment: true
         turn_on_levenberg_marquardt_qp_active_set_marquardt_damping: true # true: JTJ+lambda*(diag(JTJ)) damping, false: JTJ+lambda*I damping,  
-        turn_on_robust_kernel_qp_active_set: true
-        turn_on_mad_based_scaling_for_kernel_weights_qp_active_set: true
+        turn_on_robust_kernel_qp_active_set: true  # [NOTE]: this affects computeCovarianceLO() 
+        turn_on_mad_based_scaling_for_kernel_weights_qp_active_set: true  # [NOTE]: this affects computeCovarianceLO() 
         robust_kernel_qp_active_set: "Huber"
-        turn_on_jacobian_column_scaling_qp_active_set: true
+        turn_on_jacobian_column_scaling_qp_active_set: true               # [NOTE]: this affects computeCovarianceLO() 
         pose_increment_multiplication: "right"  # "right": right Jacobian, "left": left Jacobian
         turn_on_Sophus_SE3_update: false
-        qp_active_set_Hessian_computation: "for_loop" # "matrix_multiplication" or "for_loop"
-        
+        qp_active_set_Hessian_computation: "for_loop" # "matrix_multiplication" or "for_loop"  # [NOTE]: this affects computeCovarianceLO() 
+        qp_compute_ineq_from_imu_cov: false
+        qp_compute_ineq_from_imu_cov_sigma_coef: 1.0
+        levenberg_marquardt_trust_region_lambda_adjustment: true
+        levenberg_marquardt_trust_region_lambda_min: 1e-3
+        levenberg_marquardt_trust_region_step_quality_threshold: 0.5
+
+        bfgs_on_inequality_constraint: false
+        ifopt_on_inequality_constraint: false
+
+        inequality_constraints_solver: "qpmad"  
+        # solver options:
+        # "Ceres_left_multiplying" (unconstrained), 
+        # "Ceres_right_multiplying" (unconstrained), 
+        # "qpmad", 
+        # "LBFGSpp", 
+        # "ifopt"
+
         vehicle_kinematic_constraints:
-            max_steering_angle:  40.0   # [deg]
+            # max_steering_angle:  40.0   # [deg] KITTI (NISSAN?)
+            max_steering_angle:  30.0   # [deg] HeLiPR (2015 Hyundai i30)
             # min_steering_angle: -40.0   # [deg]
-            wheel_base: 2.709   # [m]
+            # wheel_base: 2.709   # [m] KITTI (NISSAN?)
+            wheel_base: 2.650   # [m] HeLiPR (2015 Hyundai i30)
+
+
+        # ---- ekf for covariance estimation via imu ----
+        ekf_imu_covariance_prop_on: true
+        ekf_use_const_prior_cov: false
+        ekf_const_diagonal_elem_prior_cov: 0.01
+
 
     debug:
-        print_lines_in_run: true
+        print_lines_in_run: false
         print_imu_forward_propagation_state: false
         print_get_imu_pose_at_measurement_time: false
         print_imu_pose_timeline: false
@@ -127,7 +173,7 @@
         print_imu_prop_state_fg: false
         print_estimated_state_fg: false
         print_published_pose: false
-        print_key_timestamp_in_window: false
+        print_key_timestamp_in_window: true
         print_num_factors_values: false
         print_num_downsampled_point: false
         print_num_point_in_voxel_map: false
@@ -140,10 +186,11 @@
         print_qp_active_set_matrices: false
         print_qp_active_set_solution_analysis: true
         print_qp_active_set_solution: false
-        print_qp_active_set_solution_pose_update: true
+        print_qp_active_set_solution_pose_update: false
         print_qp_icp_iter_num: false
         print_qp_sqp_iter_num: false
         try_qp_active_set_Cholesky_Decomposition_unconstrained: false
+        print_qp_levenberg_marquardt_adaptive_lambda: false
 
     init:
         imu_init_fastlio2: false
@@ -173,12 +220,18 @@
 
     ## KITTI
     # # Orientation of lidar frame w.r.t. imu frame
-    R_imu_lidar: [ 9.99997600e-01, -7.85402700e-04,  2.02440600e-03,
-                   7.55307100e-04,  9.99889800e-01,  1.48245400e-02,
-                  -2.03582600e-03, -1.48229800e-02,  9.99888100e-01 ]
-    # # Translation of lidar frame w.r.t. imu frame
-    t_imu_lidar: [ 8.10543903e-01, -3.07054359e-01, 8.02724058e-01]
+    # R_imu_lidar: [ 9.99997600e-01, -7.85402700e-04,  2.02440600e-03,
+    #                7.55307100e-04,  9.99889800e-01,  1.48245400e-02,
+    #               -2.03582600e-03, -1.48229800e-02,  9.99888100e-01 ]
+    # # # Translation of lidar frame w.r.t. imu frame
+    # t_imu_lidar: [ 8.10543903e-01, -3.07054359e-01, 8.02724058e-01]
 
+    # [IMU - Ouster Extrinsic Calibration]
+    # HeliPR
+    R_imu_lidar : [ 0.999715495593027,	0.0223448061210468,	-0.00834490926264448,
+                   -0.0224514077723064,	0.999664614804883,	-0.0129070599303583,
+                    0.00805370475188661,0.0130907427756056,	 0.999881878170293  ]	
+    t_imu_lidar : [-0.41696532, -0.00301141, 0.2996]
 
 
 

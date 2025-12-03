@@ -38,6 +38,11 @@
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/BatchFixedLagSmoother.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
+#include <gtsam/base/Matrix.h>
+#include <gtsam/base/VectorSpace.h>
+#include <gtsam/base/OptionalJacobian.h>
+#include <gtsam/navigation/InvariantEKF.h>
 
 #include <tsl/robin_map.h>
 #include "lo_dev/VoxelMap/VoxelHashMap.hpp"
@@ -48,6 +53,15 @@
 #include <qpmad/solver.h>
 #include <sophus/se3.hpp>
 #include <sophus/so3.hpp>
+
+#include <LBFGS.h>
+
+#include <ifopt/constraint_set.h>
+#include <ifopt/cost_term.h>
+#include <ifopt/variable_set.h>
+#include <ifopt/problem.h>
+#include <ifopt/solver.h>
+#include <ifopt/ipopt_solver.h>
 
 
 namespace lo_dev 
@@ -61,6 +75,7 @@ struct Config_Frontend
 {
     // ---- for general ---- 
     bool set_main_process_timer; // true: run() is called in timer callback, false: run() is called in pointcloud msg callback
+    bool turn_off_pcl_conversion_error_printing;
 
     // ---- for voxel map ----
     bool use_voxel_map;
@@ -88,6 +103,7 @@ struct Config_Frontend
     bool enable_min_range_filter;
     double lidar_scan_rate;
     std::string point_cloud_msg_timestamp;
+    bool print_sync_status;
 
     // ---- for lidar odometry ---- 
     int max_iterations;
@@ -106,13 +122,16 @@ struct Config_Frontend
     float lidar_correction_noise;
     float smooth_factor;        // what's this?
     // bool  use_imu_roll_pitch;
-    double lag; 
+    double fixed_lag; 
     bool use_lo_prior_factor_wo_between_factor; 
     std::string factor_graph_init_guess_source;
+    std::string fixed_lag_smoother_batch_or_incremental;
+    bool fix_lidar_odom_covariance;
 
     // ---- for inequality constraints ---- 
     bool turn_on_qp_ineq_constraints_active_set;
     bool turn_on_ineq_constraints;
+    std::string ineq_constraints_type;
     int sqp_iteration_num_qp_active_set;
     bool turn_on_levenberg_marquardt_qp_active_set;
     double levenberg_marquardt_lambda_qp_active_set;
@@ -124,10 +143,24 @@ struct Config_Frontend
     std::string pose_increment_multiplication;
     bool turn_on_Sophus_SE3_update;
     std::string qp_active_set_Hessian_computation;
+    bool qp_compute_ineq_from_imu_cov;
+    double qp_compute_ineq_from_imu_cov_sigma_coef;
+    bool levenberg_marquardt_trust_region_lambda_adjustment;
+    double levenberg_marquardt_trust_region_lambda_min;
+    double levenberg_marquardt_trust_region_step_quality_threshold;
+
+    bool bfgs_on_inequality_constraint;
+    bool ifopt_on_inequality_constraint;
+    std::string inequality_constraints_solver;
 
     double vehicle_kinematic_constraints_max_steering_angle;
     double vehicle_kinematic_constraints_min_steering_angle;
     double vehicle_kinematic_constraints_wheel_base;
+
+    // ---- for ekf imu propagation ----
+    bool ekf_imu_covariance_prop_on;
+    bool ekf_use_const_prior_cov;
+    double ekf_const_diagonal_elem_prior_cov;
 };
 
 
@@ -163,7 +196,9 @@ public:
     void buildLocalMap();
     void downsampleCloud();
     void preparePointPlaneResidual();
-    void solveLeastSquares();
+    void solveLeastSquares_Ceres_LeftMultiplying();
+    void solveLeastSquares_Ceres_RightMultiplying();
+    void computeCovarianceLO();
     void transformPointToWorldFrame(const PointType&  pi, PointType& po);
     void updatePoseLO();
     void updateCloudMap();
@@ -172,6 +207,11 @@ public:
     // ---- for lidar odometry (inequality constraints) ----
     void solveLeastSquares_InequalityConstraints_ActiveSet();
     void computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen::VectorXd& w, double s, std::string kernel, double c, bool mad_scale_estimation);
+    void solveLeastSquares_InequalityConstraints_BFGS();
+    void solveLeastSquares_InequalityConstraints_IFOPT();
+    double computeResidualWithDeltaX_OriginalObjective(Eigen::VectorXd delta_x, Eigen::VectorXd weights);
+    // double computeModelPredictedReduction(Eigen::VectorXd delta_x, Eigen::Matrix<double,6,6> ATWA, Eigen::Matrix<double,6,1> ATWb);
+    double computeModelPredictedReduction(Eigen::Vector<double, 6> delta_x, Eigen::Matrix<double,6,6> ATWA, Eigen::Matrix<double,6,1> ATWb);
 
     // ---- for factor graph ---- 
     bool initializeFG();
@@ -181,6 +221,8 @@ public:
     void logFactorGraphState();
 
     void updateState();
+
+
 
 private:
     // ---- for general ---- 
@@ -193,6 +235,8 @@ private:
     StateLogger stateLogger_;
     ImuRawLogger imuRawLogger_;
     FactorGraphLogger fgStateLogger_;
+    InequalityConstraintsLogger ineqConstLogger_;
+    TwistLogger twistLogger_;
 
     // ---- for voxel map ---- 
     VoxelHashMap voxelMap_;
@@ -264,7 +308,7 @@ private:
     int numResidual_ = 0;
     int numPtsNnFound_ = 0;
     std::vector<Eigen::Vector3d> pointScanCurrInBForResidual_;
-    std::vector<Eigen::Vector3d> pointScanCurrInWForResidual_;
+    // std::vector<Eigen::Vector3d> pointScanCurrInWForResidual_;
     std::vector<Eigen::Vector3d> planeNormalForResidual_;
     std::vector<double> planeDistFromOriginForResidual_;
 
@@ -274,28 +318,49 @@ private:
     gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorVelNoise_;
     gtsam::noiseModel::Diagonal::shared_ptr priorBiasNoise_;
-    gtsam::noiseModel::Diagonal::shared_ptr correctionNoise_;
+    gtsam::noiseModel::Diagonal::shared_ptr constLidarOdomNoise_;
+    gtsam::noiseModel::Gaussian::shared_ptr lidarOdomNoise_;
     gtsam::Vector noiseModelBetweenBias_;
     gtsam::NonlinearFactorGraph graphFactors_;
     gtsam::Values graphValues_;
     int key_;
     std::shared_ptr<gtsam::PreintegratedImuMeasurements> imuIntegrator_;
-    std::shared_ptr<gtsam::BatchFixedLagSmoother> fixedLagSmoother_;
+    std::shared_ptr<gtsam::BatchFixedLagSmoother> batchFixedLagSmoother_;
+    std::shared_ptr<gtsam::IncrementalFixedLagSmoother> isam2FixedLagSmoother_;
     gtsam::FixedLagSmoother::KeyTimestampMap keyTimestamps_;
-    gtsam::Pose3 T_bPrevKf_bCurrKf_lo_;
+    gtsam::Pose3 T_bPrevKf_bCurrKf_lo_;             // for logging
+    gtsam::Pose3 T_w_bCurrKf_lo_;                   // for logging
+    gtsam::Pose3 T_bPrevKf_bCurrKf_imu_log_;        // for logging
+
     gtsam::imuBias::ConstantBias biasPrevKf_;
     gtsam::NavState statePrevKf_;
     gtsam::imuBias::ConstantBias biasCurrKf_;
     gtsam::NavState stateCurrKf_;
+    gtsam::Matrix9 stateCovPrevKf_ = Eigen::MatrixXd::Identity(9, 9);
+    gtsam::Matrix9 stateCovPredCurrKf_imu_ = Eigen::MatrixXd::Identity(9, 9);
+    gtsam::Matrix9 stateCovCurrKf_ = Eigen::MatrixXd::Identity(9, 9);
+
 
     // for logging 
-    gtsam::imuBias::ConstantBias biasCurrKf_initGuess_;
-    gtsam::Pose3 posCurrKf_initGuess_;
-    gtsam::Velocity3 velCurrKf_initGuess_;
+    // gtsam::imuBias::ConstantBias biasCurrKf_initGuess_;
+    // gtsam::Pose3 posCurrKf_initGuess_;
+    // gtsam::Velocity3 velCurrKf_initGuess_;
+
+    gtsam::NavState stateCurrKf_initGuess_lo_log_;
+    gtsam::imuBias::ConstantBias biasCurrKf_initGuess_lo_log_;
+    gtsam::NavState stateCurrKf_initGuess_imu_log_;
+    gtsam::imuBias::ConstantBias biasCurrKf_initGuess_imu_log_;
+
+    Eigen::MatrixXd lidarOdomCovariance_log_ = Eigen::MatrixXd::Identity(6, 6);
+    Eigen::MatrixXd imuPreintCovariance_log_ = Eigen::MatrixXd::Identity(9, 9);
+    Eigen::MatrixXd imuBiasCovariance_log_ = Eigen::MatrixXd::Identity(6, 6);
+    Eigen::MatrixXd icpHessianLatest_log_ = Eigen::MatrixXd::Identity(6, 6);
+
 
     // ---- for qp inequality constraints ---- 
     // bool velocity_ready_ = false; // for the first iteration, run unconsrained least squares(solveLeastSquares()) to set timeScanBeg and timeScanCurr for velocity computation for ineq. constraints.
-
+    double lm_lambda_; 
+    
 };
 
 } // namespace lo_dev

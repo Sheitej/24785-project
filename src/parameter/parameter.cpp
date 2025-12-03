@@ -76,6 +76,7 @@ bool debug_print_qp_active_set_solution_pose_update;
 bool debug_print_qp_icp_iter_num;
 bool debug_print_qp_sqp_iter_num;
 bool debug_try_qp_active_set_Cholesky_Decomposition_unconstrained;
+bool debug_print_qp_levenberg_marquardt_adaptive_lambda;
 
 
 // for initialization parameter
@@ -237,6 +238,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<bool>("debug.print_qp_icp_iter_num", false);
     node->declare_parameter<bool>("debug.print_qp_sqp_iter_num", false);
     node->declare_parameter<bool>("debug.try_qp_active_set_Cholesky_Decomposition_unconstrained", false);
+    node->declare_parameter<bool>("debug.print_qp_levenberg_marquardt_adaptive_lambda", false);
 
 
     debug_print_lines_in_run = node->get_parameter("debug.print_lines_in_run").as_bool();
@@ -278,6 +280,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     debug_print_qp_icp_iter_num = node->get_parameter("debug.print_qp_icp_iter_num").as_bool();
     debug_print_qp_sqp_iter_num = node->get_parameter("debug.print_qp_sqp_iter_num").as_bool();
     debug_try_qp_active_set_Cholesky_Decomposition_unconstrained = node->get_parameter("debug.try_qp_active_set_Cholesky_Decomposition_unconstrained").as_bool();
+    debug_print_qp_levenberg_marquardt_adaptive_lambda = node->get_parameter("debug.print_qp_levenberg_marquardt_adaptive_lambda").as_bool();
 
 
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_lines_in_run " << debug_print_lines_in_run);
@@ -319,6 +322,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_qp_icp_iter_num" << debug_print_qp_icp_iter_num);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_qp_sqp_iter_num" << debug_print_qp_sqp_iter_num);
     RCLCPP_INFO_STREAM(node->get_logger(), "debug.try_qp_active_set_Cholesky_Decomposition_unconstrained" << debug_try_qp_active_set_Cholesky_Decomposition_unconstrained);
+    RCLCPP_INFO_STREAM(node->get_logger(), "debug.print_qp_levenberg_marquardt_adaptive_lambda" << debug_print_qp_levenberg_marquardt_adaptive_lambda);
 
 
     // ---------- for initialization parameter ---------- 
