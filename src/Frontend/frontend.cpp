@@ -4619,7 +4619,7 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             // Sanity checks: catch NaN, Inf, or huge spikes
             if (!std::isfinite(yaw_inc_rad) || std::abs(yaw_inc_rad) > 1.0) {  
                 RCLCPP_ERROR_STREAM(get_logger(),
-                    "❌ BAD yaw increment detected: " << yaw_inc_rad 
+                    "BAD yaw increment detected: " << yaw_inc_rad 
                     << " rad (" << yaw_inc_deg << " deg). Possible solver/scaling issue.");
             } 
             else 
