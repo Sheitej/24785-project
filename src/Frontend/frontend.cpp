@@ -3474,17 +3474,559 @@ void Frontend::computeWeightsFromResiduals(Eigen::Ref<Eigen::VectorXd> r, Eigen:
 }
 
 
+// void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
+// {
+//     // [Rule of Thumb for Rotation Optimization]
+//     //  - map SO(3)/SE(3) to so(3)/se(3) when do optimizations on rotations
+//     //      -> So, we use x_qp_iter(so(3)/se(3)) only in QP iteration where optimization happens
+//     //  - for the same reason, construct constraints with so(3)/se(3) (intuitively, linearize constraints(SE(3)->se(3)) when putting into optimization)
+//     //  - do rotation composition on SO(3)/SE(3). DO NOT just compose so(3)/se(3) like vector additions
+//     //      -> So, we compose a rotation in ICP iteration in SE(3)
+//     //      -> As you can see T1*exp(x2) != exp(x1+x2) -> exp(x1+x2) != exp(x1)(x2) - see BCH formula in State Estimation for Robotics
+
+
+//     if(!config_.use_voxel_map)
+//     {
+//         // set the local map point cloud to the kd_tree to nearest neighbor search
+//         timeLogger_.start("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+//         kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
+//         timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
+//     }
+
+//     if (debug_print_qp_active_set_init_guess)
+//     {
+//         RCLCPP_INFO_STREAM(get_logger(), "t_bPrevKf_bCurrKf_initGuess_: " << t_bPrevKf_bCurrKf_initGuess_);
+//         RCLCPP_INFO_STREAM(get_logger(), "q_bPrevKf_bCurrKf_initGuess_: " << q_bPrevKf_bCurrKf_initGuess_);
+//         RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+//         RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+//     }
+
+
+//     // Icp pose variables used for point-plane correspondance in each ICP iteration 
+//     Eigen::Vector3d t_w_bCurrKf_icp = t_w_bCurrKf_;
+//     Eigen::Quaterniond q_w_bCurrKf_icp = q_w_bCurrKf_;
+//     Sophus::SE3d T_w_bCurrKf_icp(q_w_bCurrKf_icp.toRotationMatrix(), t_w_bCurrKf_icp);
+//     // should be fed into preparePointPlane() directly
+
+//     // keep the initial pose right before entering ICP
+//     Eigen::Vector3d t_icp_init = t_w_bCurrKf_;
+//     Eigen::Quaterniond q_icp_init = q_w_bCurrKf_;
+//     Sophus::SE3d T_icp_init(q_icp_init.toRotationMatrix(), t_icp_init);
+
+//     // total transformation increment through ICP + QP
+//     Eigen::Vector3d t_total_inc = t_bPrevKf_bCurrKf_initGuess_;
+//     Eigen::Quaterniond q_total_inc = q_bPrevKf_bCurrKf_initGuess_;
+//     Sophus::SE3d T_total_inc(q_total_inc.toRotationMatrix(), t_total_inc);
+
+//     bool ineqConActivated = false;
+
+//     // ICP iteration (point-to-plane)
+//     for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) {
+//         if (debug_print_qp_icp_iter_num)
+//             RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
+
+//         // Recompute point-to-plane residuals based on q_w_bCurr_ and t_w_bCurr_
+//         pointScanCurrInBForResidual_.clear();
+//         planeNormalForResidual_.clear();
+//         planeDistFromOriginForResidual_.clear();
+
+//         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+//         preparePointPlaneResidual();
+//         timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
+
+//         // for debugging
+//         if (debug_print_num_residuals) {
+//             RCLCPP_INFO_STREAM(get_logger(), "num. of pts nn found: " << numPtsNnFound_);
+//             RCLCPP_INFO_STREAM(get_logger(), "num. of residual points: " << numResidual_);
+//         }
+
+//         lm_lambda_ = config_.levenberg_marquardt_lambda_qp_active_set; // initialize L-M lambda parameter
+
+//         // Non-linear optimization inner iteration (This is not technically SQP since this is just linearization+QP and also Lagrangian is not always involved)
+//         for (int iter_qp = 0; iter_qp < config_.sqp_iteration_num_qp_active_set; iter_qp++){
+//             if (debug_print_qp_sqp_iter_num)
+//                 RCLCPP_INFO_STREAM(get_logger(), "sqp_iter_num: " << iter_qp);
+
+//             // Compute the current pose for Jacobian computation in QP iteration
+//             Sophus::SE3d T_w_bCurrKf_qp = T_icp_init * T_total_inc; // Just need the world pose info for point-plane correspondance
+//             Eigen::Quaterniond q_w_bCurrKf_qp = Eigen::Quaterniond(T_w_bCurrKf_qp.rotationMatrix());
+//             q_w_bCurrKf_qp.normalize();
+//             Eigen::Vector3d t_w_bCurrKf_qp = T_w_bCurrKf_qp.translation();
+
+//             Eigen::MatrixXd A(numResidual_, 6); // stacked Jacobian
+//             Eigen::MatrixXd b(numResidual_, 1); // residual vector
+//             Eigen::MatrixXd b_for_kernel(numResidual_, 1); // residual vector to be used for kernel weight computation
+
+//             // ---- Jacobian Computation ----
+//             timeLogger_.start("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
+//             for (int i = 0; i < numResidual_; ++i) {
+//                 const Eigen::Vector3d bp = pointScanCurrInBForResidual_[i];
+//                 // const Eigen::Vector3d wp = q_w_bCurrKf_ * bp + t_w_bCurrKf_; // should be updated at each iteration based on the current pose update
+//                 const Eigen::Vector3d wp = q_w_bCurrKf_qp * bp + t_w_bCurrKf_qp; // should be updated at each iteration based on the current pose update
+//                 const Eigen::Vector3d wn = planeNormalForResidual_[i];  // plane normal (does not change depending on the current body pose)
+//                 const double d = planeDistFromOriginForResidual_[i];    // plane offset (does not change depending on the current body pose)
+            
+//                 if(config_.pose_increment_multiplication == "right"){
+//                     // Right Jacobian
+//                     // Eigen::Matrix3d Rwb = q_w_bCurrKf_.toRotationMatrix();
+//                     Eigen::Matrix3d Rwb = q_w_bCurrKf_qp.toRotationMatrix();
+//                     Eigen::Matrix3d bp_hat = getSkewSymMatrix(bp);
+//                     // row i of A: [ -wn^T @ Rwb @ [bp]x  wn^T @ Rwb ]
+//                     A.row(i).head<3>() = -wn.transpose() * Rwb * bp_hat;
+//                     A.row(i).tail<3>() = wn.transpose() * Rwb;
+//                     // residual b = - (wn^T @ wp + d)
+//                     b(i) = - (wn.transpose() * wp + d);
+//                     b_for_kernel(i) = b(i);             // for kernel weighting for robustifying the cost function, which is to be used later
+//                     // following a conventional || A x - b' || notation
+//                     // = || A x - (- (wn^T @ wp + d)) || 
+//                     // = || A x + (wn^T @ wp + d) ||  
+//                     // = || A x + b0 || where b0 = wn.transpose() * wp(0) + d
+//                 } else if (config_.pose_increment_multiplication == "left"){
+//                     // Left Jacobian
+//                     // row i of A: [ (p × n)^T  n^T ]
+//                     A.row(i).head<3>() = wp.cross(wn).transpose();
+//                     A.row(i).tail<3>() = wn.transpose();
+//                     // residual b = - (wn^T @ wp + d)
+//                     b(i) = - (wn.transpose() * wp + d);
+//                     b_for_kernel(i) = b(i);
+//                 } else {
+//                     RCLCPP_INFO_STREAM(get_logger(), "Left or Right Jacobian is not defined. Jacobian is set to zero.");
+//                 }
+
+//                 // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+//                 // // auto residual = [&](const Eigen::Vector3d& w, const Eigen::Vector3d& t){
+//                 // //   return wn.dot( (Eigen::AngleAxisd(w.norm(), (w.norm()>1e-12)? w.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix() * bp) + t ) + d;
+//                 // // };
+//                 // Eigen::Vector3d w0 = Eigen::Vector3d::Zero();
+//                 // Eigen::Vector3d t0 = Eigen::Vector3d::Zero();
+
+//                 // // Your analytical J at (w0,t0): A_i = [ -n^T R [b]x , n^T R ] with R from current pose
+//                 // Eigen::RowVector<double,6> Ai;
+//                 // Ai.head<3>() = -wn.transpose() * Rwb * bp_hat;
+//                 // Ai.tail<3>() =  wn.transpose() * Rwb;
+
+//                 // // Finite-diff directional check
+//                 // Eigen::Matrix<double,6,1> v; v.setRandom(); v.normalize();
+//                 // double eps = 1e-8;
+//                 // Eigen::Vector3d dw = v.head<3>() * eps;
+//                 // Eigen::Vector3d dt = v.tail<3>() * eps;
+
+//                 // double r0 = wn.dot(Rwb*bp + t_w_bCurrKf_) + d;
+//                 // Eigen::Matrix3d R1 = Rwb * Eigen::AngleAxisd(dw.norm(), (dw.norm()>1e-12)? dw.normalized():Eigen::Vector3d::UnitX()).toRotationMatrix();
+//                 // double r1 = wn.dot(R1*bp + (t_w_bCurrKf_ + Rwb*dt)) + d;
+
+//                 // double fd = (r1 - r0) / eps;
+//                 // double an = Ai * v;
+//                 // // std::cout << "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an) << "\n";
+//                 // RCLCPP_INFO_STREAM(get_logger(), "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an));
+//                 // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+//             }
+//             timeLogger_.stop("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
+
+//             // ---- Jacobian Column Scaling ----
+//             timeLogger_.start("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
+//             Eigen::DiagonalMatrix<double, Eigen::Dynamic> D; // Jacobian Scaling Matrix
+//             Eigen::VectorXd dj;  // scaling factor for each column
+//             if (config_.turn_on_jacobian_column_scaling_qp_active_set){
+//                 // 1) Build column-scaling matrix D so that columns of A_s = A * D have norm ~1 ---
+//                 const int n = A.cols();
+//                 Eigen::VectorXd col_norms(n);
+//                 for (int j = 0; j < n; ++j){
+//                     col_norms(j) = A.col(j).norm();
+//                 }
+//                 const double eps   = 1e-12;    // avoid division by zero
+//                 const double dmin  = 1e-5;     // clamp factors to avoid extreme scaling
+//                 const double dmax  = 1e+5;
+//                 dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column, eps: caring for numerical stability
+//                 dj = dj.cwiseMax(dmin).cwiseMin(dmax);
+//                 D = dj.asDiagonal(); // construct a column-scaling matrix D, where diagonal elements are dj
+
+//                 // 2) Scaled Jacobian and transform bounds/constraints ---
+//                 Eigen::MatrixXd A_s = A * D;           // columns -> unit-norm
+
+//                 // 3) Build QP in z: min 1/2 z^T H_s z + h_s^T z ---
+//                 //  done in the following scripts
+
+//                 // 4) Summary
+//                 // Now that se have ||Ax - b||2 = ||(AD)(D^-1x) - b||2 = ||(A_s)z - b||2 
+//                 //  (A_s) =    AD   : column-wise scaled Jacobian
+//                 //    z   = (D^-1x) : scaled state vector (to be mapped back to x after solving QP)
+
+//                 // update A to As (column-wise scaled A)
+//                 A = A_s; 
+//             }
+//             timeLogger_.stop("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
+
+//             timeLogger_.start("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+//             Eigen::Matrix<double,6,6> HQP = Eigen::Matrix<double,6,6>::Zero();  // Hessian in QP
+//             Eigen::Matrix<double,6,1> hQP = Eigen::Matrix<double,6,1>::Zero();  // h matrix in QP
+
+//             // ---- Weights Computation: Robust Kernel for Outlier Handling ----
+//             Eigen::VectorXd w;  
+//             if(config_.turn_on_robust_kernel_qp_active_set){
+//                 timeLogger_.start("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
+//                 double s = 0.0; // default scaling just as an option manually tune it
+//                 double c = 0.0; // default range just as an option manually tune it
+//                 timeLogger_.start("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
+//                 computeWeightsFromResiduals(b_for_kernel, w, s, config_.robust_kernel_qp_active_set, c, true);
+//                 timeLogger_.stop("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
+//             } else {
+//                 w = Eigen::VectorXd::Ones(b_for_kernel.size());
+//             }
+
+//             if (debug_print_qp_active_set_matrices){
+//                 RCLCPP_INFO_STREAM(get_logger(), "w: ");
+//                 RCLCPP_INFO_STREAM(get_logger(), w.transpose());
+//             }
+
+//             timeLogger_.start("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
+//             // Eigen::MatrixXd W = w.asDiagonal(); // This is SUPER expensive, keep this line for a lesson just in case
+//             Eigen::DiagonalMatrix<double, Eigen::Dynamic> W = w.asDiagonal();   // faster
+//             timeLogger_.stop("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
+
+//             timeLogger_.stop("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
+
+//             if(config_.qp_active_set_Hessian_computation == "matrix_multiplication"){
+//                 // cleaner but slow way
+//                 timeLogger_.start("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
+//                 HQP = 2 * A.transpose() * W * A;
+//                 hQP = - 2 * A.transpose() * W * b;
+//                 timeLogger_.stop("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
+//             } else if(config_.qp_active_set_Hessian_computation == "for_loop"){
+//                 // fast way
+//                 timeLogger_.start("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
+//                 for (int i = 0; i < numResidual_; ++i) {
+//                     double wi = w(i);
+//                     Eigen::Matrix<double,1,6> ai = A.row(i);
+//                     HQP.noalias() += 2.0 * wi * (ai.transpose() * ai);
+//                     hQP.noalias() += - 2.0 * wi * ai.transpose() * b(i);
+//                 }
+//                 timeLogger_.stop("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
+//             } else {
+//                 RCLCPP_INFO_STREAM(get_logger(), "Hessian Computation is not defined well. Set Hessian to zero.");
+//             }
+
+//             // ---- Levenberg-Marquardt Method: Adding a Damping Term Here ----
+//             if(config_.turn_on_levenberg_marquardt_qp_active_set){
+//                 timeLogger_.start("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
+//                 if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping){
+//                     HQP += 2.0 * lm_lambda_ * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+//                 } else {
+//                     HQP += 2.0 * lm_lambda_ * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+//                 }
+//                 timeLogger_.stop("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
+//             }
+//             timeLogger_.stop("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+
+//             // solution container
+//             Eigen::VectorXd x_qp_iter(6); // solution container (roll, pitch, yaw, tx, ty, tz)
+//             x_qp_iter.setZero();
+
+//             // ---- Set Inequality Constraints: Box Constraint ----
+//             Eigen::VectorXd lb(6); // scaler constraint container (roll, pitch, yaw, tx, ty, tz)
+//             Eigen::VectorXd ub(6);
+//             if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "box"){
+//                 timeLogger_.start("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
+//                 // linear velocity from the 2nd previous frame to the previous frame, expressed in the body at the 2nd previous frame
+//                 const double linVel = t_bPrev2Kf_bPrevKf_.x() / (timePrevScanEnd_ - timePrev2ScanEnd_);
+
+//                 const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
+//                 const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
+//                 double maxYawRate = linVel * std::tan(maxStrAng) / whlbase;
+//                 if (linVel < 0) maxYawRate *= -1;
+//                 double minYawRate = - maxYawRate;
+
+//                 RCLCPP_INFO_STREAM(get_logger(), "forward linear velocity: " << linVel << " [m/s]");
+//                 RCLCPP_INFO_STREAM(get_logger(), "max yaw rate: " << maxYawRate * (180/M_PI) << " [deg/s]");
+//                 RCLCPP_INFO_STREAM(get_logger(), "min yaw rate: " << minYawRate * (180/M_PI) << " [deg/s]");
+
+//                 // [Note] We have to impose constraints on AXIS-ANGLE VECTOR (alpha, beta, gamma) not really (roll, pitch, yaw)
+//                 // But we can approximate delta_yaw in body frame with the z element of the axis-angle vector
+//                 // A concrete way is axis-angle vector -> rotation matrix -> Euler angle (yaw)
+//                 //  and we can linearize the constraint by using Jacobian of Euler angle (yaw) wrt axis-angle vector
+//                 //  axis-angle vector always starts from identity in body frame(the previous body pose)
+//                 //  in that case Jacobian of Euler angle (yaw) wrt axis-angle vector is identity
+//                 //   since the right Jacobian evaluated at the identity (Jr(0)) is identity.
+//                 //  We can use this approximation because typically it would be a small rotation between scans.
+//                 //  Thus, we can typically approximate delta_yaw in body frame with the z element of the axis-angle vector
+//                 //  One potential failure is that if the body z-axis does not align with the true yaw axis, the approximation would not hold
+//                 //  In that case, we need to perform and update a ground plane normal estimation and update body z-axis according to it.
+
+//                 for (int i=0; i<6; ++i){   // initialize all the bounds as inf(no constraint essentially)
+//                     lb(i) = - std::numeric_limits<double>::max();
+//                     ub(i) = std::numeric_limits<double>::max();
+//                 }
+//                 // compute yaw rate bounds (actually wrong and it should be an affine constraint)
+//                 lb(2) = minYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
+//                 ub(2) = maxYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
+
+//                 RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_: " << timePrevScanEnd_);
+//                 RCLCPP_INFO_STREAM(get_logger(), "timePrev2ScanEnd_: " << timePrev2ScanEnd_);
+//                 RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_ - timePrev2ScanEnd_: " << timePrevScanEnd_ - timePrev2ScanEnd_);
+//                 RCLCPP_INFO_STREAM(get_logger(), "lb(2): " << lb(2));
+//                 RCLCPP_INFO_STREAM(get_logger(), "ub(2): " << ub(2));
+
+//                 // for cases we use imu covariance for box constraint
+//                 if(config_.qp_compute_ineq_from_imu_cov && !stateCovPredCurrKf_imu_.isApprox(Eigen::MatrixXd::Zero(9, 9))){
+//                     const gtsam::Vector9 var = stateCovPredCurrKf_imu_.diagonal();
+//                     const gtsam::Vector9 std = var.array().sqrt().matrix();
+
+//                     gtsam::Vector6 mean = gtsam::Pose3::Logmap(T_bPrevKf_bCurrKf_imu_log_);  // [Rx,Ry,Rz,Tx,Ty,Tz]
+//                     lb(0) = mean(0) - std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     lb(1) = mean(1) - std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     lb(2) = mean(2) - std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     lb(3) = mean(3) - std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef; // std(4) - std(6) would be velocity -> see gtsam::InvariantEKF
+//                     lb(4) = mean(4) - std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     lb(5) = mean(5) - std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(0) = mean(0) + std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(1) = mean(1) + std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(2) = mean(2) + std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(3) = mean(3) + std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(4) = mean(4) + std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                     ub(5) = mean(5) + std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
+//                 }
+
+//                 // if using column-wise Jacobian scaling for numerical stability, we also have to scale the constraint
+//                 if(config_.turn_on_jacobian_column_scaling_qp_active_set) {
+//                     Eigen::VectorXd d_inv = dj.cwiseInverse();
+//                     lb = lb.cwiseProduct(d_inv);
+//                     ub = ub.cwiseProduct(d_inv);
+//                 }
+
+//                 timeLogger_.stop("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
+//             } else {
+//                 // no constraints
+//                 lb = Eigen::VectorXd(); 
+//                 ub = Eigen::VectorXd();
+//             }
+
+//             // ---- Set Inequality Constraints: Affine Constraint ----
+//             Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd();
+//             Eigen::VectorXd Alb = Eigen::VectorXd();
+//             Eigen::VectorXd Aub = Eigen::VectorXd();
+//             if(config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "curvature"){
+//                 const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
+//                 const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
+//                 const double kappaMax = std::tan(maxStrAng) / whlbase;
+
+//                 // remember x = [rx, ry, rz, tx, ty, tz]T
+//                 // A x <= 0
+//                 // [ 0 0 -l tan(-phi_max) 0 0]  
+//                 // [ 0 0  l -tan(phi_max) 0 0] x <= 0
+//                 // [ 0 0  0            -1 0 0]
+//                 // equivalently (for simplicity):
+//                 // [ 0 0 -1 -kappa_max 0 0]  
+//                 // [ 0 0  1 -kappa_max 0 0] x <= 0
+//                 // [ 0 0  0         -1 0 0]
+
+//                 // This means:
+//                 // constraintMatrix * x <= 0
+
+//                 // Actually, it should be:
+//                 // constraintMatrix * (x_qp_iter + x_total_inc) <= 0
+//                 // , where x_qp_iter: the latest delta_x estimation in this QP inner loop,  x_total_inc: total incremental delta_x estimation in this consecutive lidar frames so far (ICP + QP)
+//                 // So it should be:
+//                 // constraintMatrix * x_qp_iter <= -constraintMatrix * x_total_inc
+//                 // constraintMatrix * x_qp_iter <= Aub, where Aub = -constraintMatrix * x_total_inc
+//                 // Now that x is actually scaled:
+//                 //   constraintMatrix * D * (D^-1 x) <= Aub
+//                 //   constraintMatrix * D * z <= Aub, we are actually solving this z (=D^-1 x) (to be mapped back afterward)
+//                 //   constraintMatrix' * z <= Aub, where constraintMatrix' = constraintMatrix * D
+//                 // Thus, we have to scale constraintMatrix but we don't have to do that with Aub
+
+
+//                 constraintMatrix = Eigen::MatrixXd::Zero(3,6);
+//                 constraintMatrix(0,2) = -1.0;
+//                 constraintMatrix(0,3) = -kappaMax;
+//                 constraintMatrix(1,2) = 1.0;
+//                 constraintMatrix(1,3) = -kappaMax;
+//                 constraintMatrix(2,3) = -1.0;
+
+//                 Alb = Eigen::VectorXd::Constant(3, -std::numeric_limits<double>::max());
+
+//                 Eigen::Vector<double, 6> a_total_inc = T_total_inc.log();
+//                 Eigen::Vector<double, 6> x_total_inc;
+//                 x_total_inc.head<3>() = a_total_inc.tail<3>();
+//                 x_total_inc.tail<3>() = a_total_inc.head<3>();
+//                 Aub = -constraintMatrix * x_total_inc;
+
+//                 // we need to scale the constraintMatrix
+//                 if(config_.turn_on_jacobian_column_scaling_qp_active_set){
+//                     constraintMatrix = constraintMatrix * D;
+//                 }
+//             }
+
+//             if (debug_print_qp_active_set_matrices_jacobian_residual){
+//                 RCLCPP_INFO_STREAM(get_logger(), "A: " << A);
+//                 RCLCPP_INFO_STREAM(get_logger(), "b: " << b);
+//             }
+
+//             if (debug_print_qp_active_set_matrices){
+//                 RCLCPP_INFO_STREAM(get_logger(), "HQP: ");
+//                 RCLCPP_INFO_STREAM(get_logger(), HQP);
+//                 RCLCPP_INFO_STREAM(get_logger(), "hQP: ");
+//                 RCLCPP_INFO_STREAM(get_logger(), hQP);
+//                 RCLCPP_INFO_STREAM(get_logger(), "lb: " << lb);
+//                 RCLCPP_INFO_STREAM(get_logger(), "ub: " << ub);
+//                 RCLCPP_INFO_STREAM(get_logger(), "constraintMatrix: " << constraintMatrix);
+//                 RCLCPP_INFO_STREAM(get_logger(), "Alb: " << Alb);
+//                 RCLCPP_INFO_STREAM(get_logger(), "Aub: " << Aub);
+//             }
+
+//             // ---- Solve Inequality Constrained QP ----
+//             timeLogger_.start("[SQP]: Solve QP", __FUNCTION__, __LINE__);
+//             qpmad::Solver qpmadSolver;   // Solver = SolverTemplate<double, Eigen::Dynamic, 1, Eigen::Dynamic>; in qpmad/solver.h
+//             qpmad::SolverParameters param;
+//             param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
+//             qpmad::Solver::ReturnStatus status =
+//                 qpmadSolver.solve(x_qp_iter, HQP, hQP, lb, ub, constraintMatrix, Alb, Aub, param);
+//             // [out] Vector primal – solution vector, mandatory, allocated if needed
+//             // [in,out] Matrix H – Hessian, mandatory, non-empty, factorized in-place
+//             // [in] Vector h – objective vector, mandatory, may be empty
+//             // [in] Vector lb – vector of lower bounds, may be omitted or may be empty consistently with ub
+//             // [in] Vector ub – vector of upper bounds, may be omitted or may be empty consistently with lb
+//             // [in] Matrix A – general constraints matrix, may be omitted with all general constraints, may be empty
+//             // [in] Vector Alb – lower bounds of general constraints, may be omitted with all general constraints, may be empty
+//             // [in] Vector Aub – upper bounds of general constraints, may be omitted (if A and Alb are present they are assumed to be equality constraints), may be empty
+//             // [in] SolverParameters param – solver parameters, may be omitted
+
+//             // sanity check with Cholesky Decomposition linear solver
+//             if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained){
+//                 auto H_test = HQP / 2;
+//                 auto h_test = - hQP / 2;
+//                 x_qp_iter = H_test.ldlt().solve(-h_test);
+//             }
+
+//             // check optimization status
+//             if (status != qpmad::Solver::OK){
+//                 RCLCPP_INFO_STREAM(get_logger(), "Error in solving inequality constrained optimization problem with QPmad library.");
+//             }
+
+//             // extract the optimization status
+//             Eigen::VectorXd dual;
+//             Eigen::Matrix<qpmad::MatrixIndex, Eigen::Dynamic, 1> indices;
+//             Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
+//             qpmadSolver.getInequalityDual(dual, indices, is_lower);
+
+//             if (debug_print_qp_active_set_solution_analysis){
+//                 dualLogger_.recordDual(timeCurrScanBeg_, dual, indices, is_lower);
+//                 if (dual.size() > 0){
+//                     ineqConActivated = true;
+//                     timeLogger_.start("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
+//                     RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
+//                     RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
+//                     timeLogger_.stop("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
+
+//                     if (constraintMatrix.size() == 0) {
+//                         RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
+//                     } else if (constraintMatrix.cols() != x_qp_iter.size()) {
+//                         RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
+//                     } else {
+//                         RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * x_qp_iter).transpose());
+//                     }
+//                 }
+//             }
+
+//             // scale the solution back if necessary
+//             Eigen::VectorXd z = Eigen::VectorXd::Zero(6);
+//             if (config_.turn_on_jacobian_column_scaling_qp_active_set) {
+//                 z = x_qp_iter;
+//                 //    z   = (D^-1 x) : scaled state vector (to be mapped back to x after solving QP)
+//                 // --- 5) Map back to original variables (unscale) ---
+//                 x_qp_iter = D * z;  // x = Dz
+//             }
+//             timeLogger_.stop("[SQP]: Solve QP", __FUNCTION__, __LINE__);
+
+//             // ---- Step Size Check: L-M Lambda Update ----
+//             if(config_.levenberg_marquardt_trust_region_lambda_adjustment){
+//                 if(!config_.turn_on_jacobian_column_scaling_qp_active_set) z = x_qp_iter;
+//                 // Here we examine the step size, and adjust radius_(=1/lamdba_, following Ceres implementation)
+//                 // 1. solve the normal equation
+//                 // 2. compute the function decrease and step size quality
+//                 // 3. if step size quality is good -> widen the radius (smaller lambda) -> and go to the following step
+//                 //    if step size quality is bad  -> reduce the radius (larger lambda) 
+//                 const auto ATWA = 0.5 * HQP;
+//                 const auto ATWb = 0.5 * hQP;
+//                 const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6);
+//                 const double f = computeResidualWithDeltaX_OriginalObjective(x0, w);
+//                 const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(x_qp_iter, w); // f should be based on the solution scaled back (x_qp_iter)
+//                 const double m = computeModelPredictedReduction(x0, ATWA, ATWb);
+//                 const double m_delta_x = computeModelPredictedReduction(z, ATWA, ATWb); // m (quadratic model) should be based on the solution scaled (z) because ATWA, ATWB are scaled
+//                 const double rho = (f - f_delta_x) / (m - m_delta_x);
+
+//                 // update lambda in LM trust region depending on the step quality
+//                 if(rho < 0.25){     // if step size quality is bad  -> reduce the radius (larger lambda) 
+//                     lm_lambda_ = 2 * lm_lambda_;
+//                 }else if(rho > 0.75){   // if step size quality is good -> widen the radius (smaller lambda)
+//                     lm_lambda_ = std::max(lm_lambda_ / 1.414, config_.levenberg_marquardt_trust_region_lambda_min);
+//                 }
+
+//                 if (debug_print_qp_levenberg_marquardt_adaptive_lambda){
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          lm_lambda : " << lm_lambda_);
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]            delta_x : " << z.transpose());
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] delta_x_scaledback : " << x_qp_iter.transpose());
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  f : " << f);
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          f_delta_x : " << f_delta_x);
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  m : " << m);
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          m_delta_x : " << m_delta_x);
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]       step quality : " << rho);
+//                 }
+
+//                 // if the step is not good, reject it and go to the next iteration
+//                 if(rho < config_.levenberg_marquardt_trust_region_step_quality_threshold){
+//                     RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] step quality: " << rho << ", current step is rejected.");
+//                     continue;
+//                 }
+//             }
+
+//             if (debug_print_qp_active_set_solution){
+//                 for (unsigned int i=0; i<6; ++i){
+//                     RCLCPP_INFO_STREAM(get_logger(), "x_qp_iter(" << i << "): " << x_qp_iter(i));
+//                 }
+//             }
+
+//             // ---- Pose Increment Update in QP + ICP so far ----
+//             Eigen::Vector<double, 6> a_qp_iter;
+//             a_qp_iter.tail<3>() = x_qp_iter.head<3>(); // axis-angle vector (alpha, beta, gamma)
+//             a_qp_iter.head<3>() = x_qp_iter.tail<3>(); // translation vector (x,y,z)
+//             const Sophus::SE3d exp_x_qp_iter = Sophus::SE3d::exp(a_qp_iter);
+
+//             T_total_inc = T_total_inc * exp_x_qp_iter;
+
+//             if (debug_print_qp_active_set_solution_pose_update){
+//                 // RCLCPP_INFO_STREAM(get_logger(), "T_total_inc: " << T_total_inc);
+//             }
+
+//         } // End: iterative QP inner iteration
+
+//         // ---- Sensor Pose in world frame Update in ICP for new point-plane correspondance computation ----
+//         T_w_bCurrKf_icp = T_icp_init * T_total_inc;
+//         if (config_.pose_increment_multiplication == "right"){
+//             T_w_bCurrKf_icp = T_icp_init * T_total_inc; // update by right multiplication
+//         } else if (config_.pose_increment_multiplication == "left"){
+//             T_w_bCurrKf_icp = T_total_inc * T_icp_init; // update by left multiplication
+//         } else {
+//             RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
+//         }
+
+//         // The pose update should be outside the icp-qp loop (to be corrected)
+//         q_w_bCurrKf_ = Eigen::Quaterniond(T_w_bCurrKf_icp.rotationMatrix()).normalized();
+//         t_w_bCurrKf_ = T_w_bCurrKf_icp.translation();
+
+//     } // End: icp iteration
+
+//     // log time
+//     if(ineqConActivated){
+//         ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, true);
+//     } else {
+//         ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, false);
+//     }
+
+//     // end of the point-to-plane icp with inequality constraints
+// }
+
 void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
 {
-    // [Rule of Thumb for Rotation Optimization]
-    //  - map SO(3)/SE(3) to so(3)/se(3) when do optimizations on rotations
-    //      -> So, we use x_qp_iter(so(3)/se(3)) only in QP iteration where optimization happens
-    //  - for the same reason, construct constraints with so(3)/se(3) (intuitively, linearize constraints(SE(3)->se(3)) when putting into optimization)
-    //  - do rotation composition on SO(3)/SE(3). DO NOT just compose so(3)/se(3) like vector additions
-    //      -> So, we compose a rotation in ICP iteration in SE(3)
-    //      -> As you can see T1*exp(x2) != exp(x1+x2) -> exp(x1+x2) != exp(x1)(x2) - see BCH formula in State Estimation for Robotics
-
-
     if(!config_.use_voxel_map)
     {
         // set the local map point cloud to the kd_tree to nearest neighbor search
@@ -3492,6 +4034,10 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
         kdTreeMapLocal_->setInputCloud(cloudMapLocalDs_);
         timeLogger_.stop("kdTreeMapLocal_->setInputCloud", __FUNCTION__, __LINE__);
     }
+
+    // transform the current absolute pose based on initial guess (to be used for preparePointPlaneResidual())
+    t_w_bCurrKf_ = q_w_bCurrKf_ * t_bPrevKf_bCurrKf_initGuess_ + t_w_bCurrKf_;
+    q_w_bCurrKf_ = (q_w_bCurrKf_ * q_bPrevKf_bCurrKf_initGuess_).normalized();
 
     if (debug_print_qp_active_set_init_guess)
     {
@@ -3501,75 +4047,55 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
         RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
     }
 
-
-    // Icp pose variables used for point-plane correspondance in each ICP iteration 
-    Eigen::Vector3d t_w_bCurrKf_icp = t_w_bCurrKf_;
-    Eigen::Quaterniond q_w_bCurrKf_icp = q_w_bCurrKf_;
-    Sophus::SE3d T_w_bCurrKf_icp(q_w_bCurrKf_icp.toRotationMatrix(), t_w_bCurrKf_icp);
-    // should be fed into preparePointPlane() directly
-
-    // keep the initial pose right before entering ICP
-    Eigen::Vector3d t_icp_init = t_w_bCurrKf_;
-    Eigen::Quaterniond q_icp_init = q_w_bCurrKf_;
-    Sophus::SE3d T_icp_init(q_icp_init.toRotationMatrix(), t_icp_init);
-
-    // total transformation increment through ICP + QP
-    Eigen::Vector3d t_total_inc = t_bPrevKf_bCurrKf_initGuess_;
-    Eigen::Quaterniond q_total_inc = q_bPrevKf_bCurrKf_initGuess_;
-    Sophus::SE3d T_total_inc(q_total_inc.toRotationMatrix(), t_total_inc);
-
-    bool ineqConActivated = false;
+    Eigen::VectorXd x(6); // state vector (roll, pitch, yaw, tx, ty, tz)
 
     // ICP iteration (point-to-plane)
-    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) {
+    for (int iter_cnt = 0; iter_cnt < config_.icp_iteration_num; iter_cnt++) 
+    {
         if (debug_print_qp_icp_iter_num)
             RCLCPP_INFO_STREAM(get_logger(), "icp_iter_num: " << iter_cnt);
-
-        // Recompute point-to-plane residuals based on q_w_bCurr_ and t_w_bCurr_
-        pointScanCurrInBForResidual_.clear();
-        planeNormalForResidual_.clear();
-        planeDistFromOriginForResidual_.clear();
 
         timeLogger_.start("preparePointPlaneResidual", __FUNCTION__, __LINE__);
         preparePointPlaneResidual();
         timeLogger_.stop("preparePointPlaneResidual", __FUNCTION__, __LINE__);
 
+        // if (debug_print_qp_active_set_point_plane_residual_pose)
+        // {
+        //     RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_);
+        //     RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+        // }
+
         // for debugging
-        if (debug_print_num_residuals) {
+        if (debug_print_num_residuals) 
+        {
             RCLCPP_INFO_STREAM(get_logger(), "num. of pts nn found: " << numPtsNnFound_);
             RCLCPP_INFO_STREAM(get_logger(), "num. of residual points: " << numResidual_);
         }
 
-        lm_lambda_ = config_.levenberg_marquardt_lambda_qp_active_set; // initialize L-M lambda parameter
-
-        // Non-linear optimization inner iteration (This is not technically SQP since this is just linearization+QP and also Lagrangian is not always involved)
-        for (int iter_qp = 0; iter_qp < config_.sqp_iteration_num_qp_active_set; iter_qp++){
+        // Non-linear optimization inner iteration (SQP)
+        for (int iter_qp = 0; iter_qp < config_.sqp_iteration_num_qp_active_set; iter_qp++)
+        {
             if (debug_print_qp_sqp_iter_num)
                 RCLCPP_INFO_STREAM(get_logger(), "sqp_iter_num: " << iter_qp);
 
-            // Compute the current pose for Jacobian computation in QP iteration
-            Sophus::SE3d T_w_bCurrKf_qp = T_icp_init * T_total_inc; // Just need the world pose info for point-plane correspondance
-            Eigen::Quaterniond q_w_bCurrKf_qp = Eigen::Quaterniond(T_w_bCurrKf_qp.rotationMatrix());
-            q_w_bCurrKf_qp.normalize();
-            Eigen::Vector3d t_w_bCurrKf_qp = T_w_bCurrKf_qp.translation();
-
             Eigen::MatrixXd A(numResidual_, 6); // stacked Jacobian
-            Eigen::MatrixXd b(numResidual_, 1); // residual vector
+            Eigen::MatrixXd b(numResidual_, 1); // residual vectorn
             Eigen::MatrixXd b_for_kernel(numResidual_, 1); // residual vector to be used for kernel weight computation
 
-            // ---- Jacobian Computation ----
             timeLogger_.start("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
-            for (int i = 0; i < numResidual_; ++i) {
+            // loop over all the residuals and add them to the objective funtion, forming the entire objective function in the least squares problem
+            for (int i = 0; i < numResidual_; ++i) 
+            {
                 const Eigen::Vector3d bp = pointScanCurrInBForResidual_[i];
-                // const Eigen::Vector3d wp = q_w_bCurrKf_ * bp + t_w_bCurrKf_; // should be updated at each iteration based on the current pose update
-                const Eigen::Vector3d wp = q_w_bCurrKf_qp * bp + t_w_bCurrKf_qp; // should be updated at each iteration based on the current pose update
+                const Eigen::Vector3d wp = q_w_bCurrKf_ * bp + t_w_bCurrKf_; // should be updated at each iteration based on the current pose update
                 const Eigen::Vector3d wn = planeNormalForResidual_[i];  // plane normal (does not change depending on the current body pose)
                 const double d = planeDistFromOriginForResidual_[i];    // plane offset (does not change depending on the current body pose)
-            
-                if(config_.pose_increment_multiplication == "right"){
+
+                // Jacobian Computation
+                if(config_.pose_increment_multiplication == "right")
+                {
                     // Right Jacobian
-                    // Eigen::Matrix3d Rwb = q_w_bCurrKf_.toRotationMatrix();
-                    Eigen::Matrix3d Rwb = q_w_bCurrKf_qp.toRotationMatrix();
+                    Eigen::Matrix3d Rwb = q_w_bCurrKf_.toRotationMatrix();
                     Eigen::Matrix3d bp_hat = getSkewSymMatrix(bp);
                     // row i of A: [ -wn^T @ Rwb @ [bp]x  wn^T @ Rwb ]
                     A.row(i).head<3>() = -wn.transpose() * Rwb * bp_hat;
@@ -3581,7 +4107,9 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                     // = || A x - (- (wn^T @ wp + d)) || 
                     // = || A x + (wn^T @ wp + d) ||  
                     // = || A x + b0 || where b0 = wn.transpose() * wp(0) + d
-                } else if (config_.pose_increment_multiplication == "left"){
+                }
+                else if (config_.pose_increment_multiplication == "left")
+                {
                     // Left Jacobian
                     // row i of A: [ (p × n)^T  n^T ]
                     A.row(i).head<3>() = wp.cross(wn).transpose();
@@ -3589,7 +4117,9 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                     // residual b = - (wn^T @ wp + d)
                     b(i) = - (wn.transpose() * wp + d);
                     b_for_kernel(i) = b(i);
-                } else {
+                }
+                else
+                {
                     RCLCPP_INFO_STREAM(get_logger(), "Left or Right Jacobian is not defined. Jacobian is set to zero.");
                 }
 
@@ -3620,34 +4150,55 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 // // std::cout << "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an) << "\n";
                 // RCLCPP_INFO_STREAM(get_logger(), "dir-deriv num=" << fd << "  analytic=" << an << "  diff=" << std::abs(fd-an));
                 // ----- Sanity check for Jacobian (analytical Jacobian vs finite difference Jacobian) ----- 
+
             }
             timeLogger_.stop("[SQP]: Jacobian Computation", __FUNCTION__, __LINE__);
 
-            // ---- Jacobian Column Scaling ----
             timeLogger_.start("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
             Eigen::DiagonalMatrix<double, Eigen::Dynamic> D; // Jacobian Scaling Matrix
             Eigen::VectorXd dj;  // scaling factor for each column
-            if (config_.turn_on_jacobian_column_scaling_qp_active_set){
+            if (config_.turn_on_jacobian_column_scaling_qp_active_set)
+            {
+                // bounds/constraints scaled on the step x 
+                // Eigen::VectorXd lb_x, ub_x;        // direct bounds on x
+                // Eigen::MatrixXd Acon;              // general constraint matrix on x 
+                // Eigen::VectorXd Alb_x, Aub_x;
+
                 // 1) Build column-scaling matrix D so that columns of A_s = A * D have norm ~1 ---
                 const int n = A.cols();
                 Eigen::VectorXd col_norms(n);
-                for (int j = 0; j < n; ++j){
+                for (int j = 0; j < n; ++j)
+                {
                     col_norms(j) = A.col(j).norm();
                 }
                 const double eps   = 1e-12;    // avoid division by zero
                 const double dmin  = 1e-5;     // clamp factors to avoid extreme scaling
                 const double dmax  = 1e+5;
+                // Eigen::VectorXd dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column
                 dj = (col_norms.array() > eps).select(1.0 / col_norms.array(), 1.0); // scaling factor for each column, eps: caring for numerical stability
                 dj = dj.cwiseMax(dmin).cwiseMin(dmax);
-                D = dj.asDiagonal(); // construct a column-scaling matrix D, where diagonal elements are dj
+                // construct a column-scaling matrix D, where diagonal elements are dj
+                D = dj.asDiagonal();
 
                 // 2) Scaled Jacobian and transform bounds/constraints ---
-                Eigen::MatrixXd A_s = A * D;           // columns -> unit-norm
+                // column scaling, matrix multiplication
+                Eigen::MatrixXd A_s = A * D;           // columns ~ unit-norm
+                // // If you have simple bounds on the step x, convert to z: z = D^{-1} x
+                // Eigen::VectorXd lb_z, ub_z;
+                // if (lb_x.size() == n && ub_x.size() == n) {
+                // // Dinv is just 1/dj
+                // Eigen::VectorXd d_inv = dj.cwiseInverse();
+                // lb_z = lb_x.cwiseProduct(d_inv);
+                // ub_z = ub_x.cwiseProduct(d_inv);
+                // }
+                // // If you have general linear constraints on x: Acon * x in [Alb_x, Aub_x]
+                // // convert to z: (Acon * D) * z in [Alb_x, Aub_x]
+                // Eigen::MatrixXd Acon_z;
+                // if (Acon.size() > 0) Acon_z = Acon * D;
 
                 // 3) Build QP in z: min 1/2 z^T H_s z + h_s^T z ---
                 //  done in the following scripts
 
-                // 4) Summary
                 // Now that se have ||Ax - b||2 = ||(AD)(D^-1x) - b||2 = ||(A_s)z - b||2 
                 //  (A_s) =    AD   : column-wise scaled Jacobian
                 //    z   = (D^-1x) : scaled state vector (to be mapped back to x after solving QP)
@@ -3657,90 +4208,113 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             }
             timeLogger_.stop("[SQP]: Jacobian Column Scaling", __FUNCTION__, __LINE__);
 
-            timeLogger_.start("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+            // build the QP formulation
+            // min(xQP): 1/2 xQP.T @ HQP @ xQP + hQP.T @ xQP
+            // s.t.    : lb  <=   xQP   <= ub
+            //           Alb <= A @ xQP <= Aub
+
             Eigen::Matrix<double,6,6> HQP = Eigen::Matrix<double,6,6>::Zero();  // Hessian in QP
             Eigen::Matrix<double,6,1> hQP = Eigen::Matrix<double,6,1>::Zero();  // h matrix in QP
 
-            // ---- Weights Computation: Robust Kernel for Outlier Handling ----
+            timeLogger_.start("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
+            // compute the weights first based on the robust kernel
             Eigen::VectorXd w;  
-            if(config_.turn_on_robust_kernel_qp_active_set){
+            if(config_.turn_on_robust_kernel_qp_active_set)
+            {
+                // if(config_.turn_on_mad_based_scaling_for_kernel_weights_qp_active_set)
+                // {
                 timeLogger_.start("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
                 double s = 0.0; // default scaling just as an option manually tune it
                 double c = 0.0; // default range just as an option manually tune it
                 timeLogger_.start("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
                 computeWeightsFromResiduals(b_for_kernel, w, s, config_.robust_kernel_qp_active_set, c, true);
                 timeLogger_.stop("[SQP]: computeWeightsFromResiduals", __FUNCTION__, __LINE__);
-            } else {
+            }
+            else
+            {
                 w = Eigen::VectorXd::Ones(b_for_kernel.size());
             }
 
-            if (debug_print_qp_active_set_matrices){
+            if (debug_print_qp_active_set_matrices)
+            {
                 RCLCPP_INFO_STREAM(get_logger(), "w: ");
                 RCLCPP_INFO_STREAM(get_logger(), w.transpose());
             }
 
             timeLogger_.start("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
-            // Eigen::MatrixXd W = w.asDiagonal(); // This is SUPER expensive, keep this line for a lesson just in case
-            Eigen::DiagonalMatrix<double, Eigen::Dynamic> W = w.asDiagonal();   // faster
+            // Eigen::MatrixXd W = w.asDiagonal(); // This is super expensive, keep this just in case
+            Eigen::DiagonalMatrix<double, Eigen::Dynamic> W = w.asDiagonal();   // fast
             timeLogger_.stop("[SQP]: W = w.asDiagonal()", __FUNCTION__, __LINE__);
 
             timeLogger_.stop("[SQP]: Hessian Computation - Kernel Weights", __FUNCTION__, __LINE__);
 
-            if(config_.qp_active_set_Hessian_computation == "matrix_multiplication"){
+            if(config_.qp_active_set_Hessian_computation == "matrix_multiplication")
+            {
                 // cleaner but slow way
                 timeLogger_.start("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
                 HQP = 2 * A.transpose() * W * A;
                 hQP = - 2 * A.transpose() * W * b;
                 timeLogger_.stop("[SQP]: Hessian Computation - Hessian (Mat. Multiplication)", __FUNCTION__, __LINE__);
-            } else if(config_.qp_active_set_Hessian_computation == "for_loop"){
+            }
+            else if(config_.qp_active_set_Hessian_computation == "for_loop")
+            {
                 // fast way
                 timeLogger_.start("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
-                for (int i = 0; i < numResidual_; ++i) {
+                for (int i = 0; i < numResidual_; ++i) 
+                {
                     double wi = w(i);
                     Eigen::Matrix<double,1,6> ai = A.row(i);
                     HQP.noalias() += 2.0 * wi * (ai.transpose() * ai);
                     hQP.noalias() += - 2.0 * wi * ai.transpose() * b(i);
                 }
                 timeLogger_.stop("[SQP]: Hessian Computation - Hessian (For-loop)", __FUNCTION__, __LINE__);
-            } else {
+            }
+            else
+            {
                 RCLCPP_INFO_STREAM(get_logger(), "Hessian Computation is not defined well. Set Hessian to zero.");
             }
 
-            // ---- Levenberg-Marquardt Method: Adding a Damping Term Here ----
-            if(config_.turn_on_levenberg_marquardt_qp_active_set){
+            if(config_.turn_on_levenberg_marquardt_qp_active_set)
+            {
                 timeLogger_.start("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
-                if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping){
-                    HQP += 2.0 * lm_lambda_ * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
-                } else {
-                    HQP += 2.0 * lm_lambda_ * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                const double lambda = config_.levenberg_marquardt_lambda_qp_active_set;
+                if(config_.turn_on_levenberg_marquardt_qp_active_set_marquardt_damping)
+                {
+                    HQP += 2.0 * lambda * (HQP.diagonal().asDiagonal()); // // Marquardt-type damping, "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
+                }
+                else
+                {
+                    HQP += 2.0 * lambda * Eigen::MatrixXd::Identity(6,6); // "2.0 *" is for conversion to QP formulation (* 1/2 afterward)
                 }
                 timeLogger_.stop("[SQP]: Hessian Computation - LM Hessian", __FUNCTION__, __LINE__);
             }
             timeLogger_.stop("[SQP]: Hessian Computation", __FUNCTION__, __LINE__);
 
-            // solution container
-            Eigen::VectorXd x_qp_iter(6); // solution container (roll, pitch, yaw, tx, ty, tz)
-            x_qp_iter.setZero();
+            // solution vector
+            Eigen::VectorXd xQP(6); // solution vector (roll, pitch, yaw, tx, ty, tz)
 
-            // ---- Set Inequality Constraints: Box Constraint ----
-            Eigen::VectorXd lb(6); // scaler constraint container (roll, pitch, yaw, tx, ty, tz)
+            // scaler inequality constraints
+            Eigen::VectorXd lb(6); // scaler constraint vector (roll, pitch, yaw, tx, ty, tz)
             Eigen::VectorXd ub(6);
-            if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "box"){
+            if (t_bPrev2Kf_bPrevKf_ != Eigen::Vector3d::Zero() && config_.turn_on_ineq_constraints)
+            {
                 timeLogger_.start("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
                 // linear velocity from the 2nd previous frame to the previous frame, expressed in the body at the 2nd previous frame
                 const double linVel = t_bPrev2Kf_bPrevKf_.x() / (timePrevScanEnd_ - timePrev2ScanEnd_);
 
                 const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
+                // const double minStrAng = config_.vehicle_kinematic_constraints_min_steering_angle * (M_PI/180);  // [rad]
                 const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
                 double maxYawRate = linVel * std::tan(maxStrAng) / whlbase;
+                // double minYawRate = linVel.x() * std::tan(-maxStrAng) / whlbase;
                 if (linVel < 0) maxYawRate *= -1;
                 double minYawRate = - maxYawRate;
 
-                RCLCPP_INFO_STREAM(get_logger(), "forward linear velocity: " << linVel << " [m/s]");
-                RCLCPP_INFO_STREAM(get_logger(), "max yaw rate: " << maxYawRate * (180/M_PI) << " [deg/s]");
-                RCLCPP_INFO_STREAM(get_logger(), "min yaw rate: " << minYawRate * (180/M_PI) << " [deg/s]");
+                RCLCPP_INFO_STREAM(get_logger(), "----------------forward linear velocity-----------------: " << linVel << " [m/s]");
+                RCLCPP_INFO_STREAM(get_logger(), "max yaw rate : " << maxYawRate * (180/M_PI) << " [deg/s]");
+                RCLCPP_INFO_STREAM(get_logger(), "min yaw rate : " << minYawRate * (180/M_PI) << " [deg/s]");
 
-                // [Note] We have to impose constraints on AXIS-ANGLE VECTOR (alpha, beta, gamma) not really (roll, pitch, yaw)
+                // !!! We have to impose constraints on AXIS-ANGLE VECTOR (alpha, beta, gamma) not really (roll, pitch, yaw) !!!
                 // But we can approximate delta_yaw in body frame with the z element of the axis-angle vector
                 // A concrete way is axis-angle vector -> rotation matrix -> Euler angle (yaw)
                 //  and we can linearize the constraint by using Jacobian of Euler angle (yaw) wrt axis-angle vector
@@ -3752,134 +4326,95 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
                 //  One potential failure is that if the body z-axis does not align with the true yaw axis, the approximation would not hold
                 //  In that case, we need to perform and update a ground plane normal estimation and update body z-axis according to it.
 
-                for (int i=0; i<6; ++i){   // initialize all the bounds as inf(no constraint essentially)
+                for (int i=0; i<6; ++i)   // initialize all the bounds as inf(no constraint essentially)
+                {
                     lb(i) = - std::numeric_limits<double>::max();
                     ub(i) = std::numeric_limits<double>::max();
                 }
-                // compute yaw rate bounds (actually wrong and it should be an affine constraint)
-                lb(2) = minYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
+                // put yaw rate constraints only on z-component of axis-angle representation
+                lb(2) = minYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);    // need to scale actually
                 ub(2) = maxYawRate * (timePrevScanEnd_ - timePrev2ScanEnd_);
 
-                RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_: " << timePrevScanEnd_);
-                RCLCPP_INFO_STREAM(get_logger(), "timePrev2ScanEnd_: " << timePrev2ScanEnd_);
-                RCLCPP_INFO_STREAM(get_logger(), "timePrevScanEnd_ - timePrev2ScanEnd_: " << timePrevScanEnd_ - timePrev2ScanEnd_);
-                RCLCPP_INFO_STREAM(get_logger(), "lb(2): " << lb(2));
-                RCLCPP_INFO_STREAM(get_logger(), "ub(2): " << ub(2));
+                lb(5) = 0.0;    // need to scale actually
+                ub(5) = 0.05;
 
-                // for cases we use imu covariance for box constraint
-                if(config_.qp_compute_ineq_from_imu_cov && !stateCovPredCurrKf_imu_.isApprox(Eigen::MatrixXd::Zero(9, 9))){
-                    const gtsam::Vector9 var = stateCovPredCurrKf_imu_.diagonal();
-                    const gtsam::Vector9 std = var.array().sqrt().matrix();
+                RCLCPP_INFO_STREAM(get_logger(), "Unscaled lb(2): " << lb(2)* (180/M_PI) << " [deg]");
+                RCLCPP_INFO_STREAM(get_logger(), "Unscaled ub(2): " << ub(2)* (180/M_PI) << " [deg]");
+                RCLCPP_INFO_STREAM(get_logger(), "[Constraint check] delta-yaw attempt (axis angle) = " << x(2)*(180/M_PI)<< " [deg]");
+                RCLCPP_INFO_STREAM(get_logger(), "[Constraint check] Z attempt = " << x(5)<< " [m]");
 
-                    gtsam::Vector6 mean = gtsam::Pose3::Logmap(T_bPrevKf_bCurrKf_imu_log_);  // [Rx,Ry,Rz,Tx,Ty,Tz]
-                    lb(0) = mean(0) - std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    lb(1) = mean(1) - std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    lb(2) = mean(2) - std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    lb(3) = mean(3) - std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef; // std(4) - std(6) would be velocity -> see gtsam::InvariantEKF
-                    lb(4) = mean(4) - std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    lb(5) = mean(5) - std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(0) = mean(0) + std(0) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(1) = mean(1) + std(1) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(2) = mean(2) + std(2) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(3) = mean(3) + std(6) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(4) = mean(4) + std(7) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                    ub(5) = mean(5) + std(8) * config_.qp_compute_ineq_from_imu_cov_sigma_coef;
-                }
 
                 // if using column-wise Jacobian scaling for numerical stability, we also have to scale the constraint
-                if(config_.turn_on_jacobian_column_scaling_qp_active_set) {
+                if(config_.turn_on_jacobian_column_scaling_qp_active_set)
+                {
                     Eigen::VectorXd d_inv = dj.cwiseInverse();
+                    //Eigen::VectorXd d_inv = dj;
                     lb = lb.cwiseProduct(d_inv);
                     ub = ub.cwiseProduct(d_inv);
+                    RCLCPP_INFO_STREAM(get_logger(), "Scaled lb(2): " << lb(2));
+                    RCLCPP_INFO_STREAM(get_logger(), "Scaled ub(2): " << ub(2));
                 }
 
                 timeLogger_.stop("[SQP]: Inequality Setting", __FUNCTION__, __LINE__);
-            } else {
+            }
+            else 
+            {
                 // no constraints
                 lb = Eigen::VectorXd(); 
                 ub = Eigen::VectorXd();
             }
 
-            // ---- Set Inequality Constraints: Affine Constraint ----
+            // linear inequality constraint (We don't enforce linear constraint for now)
             Eigen::MatrixXd constraintMatrix = Eigen::MatrixXd();
             Eigen::VectorXd Alb = Eigen::VectorXd();
             Eigen::VectorXd Aub = Eigen::VectorXd();
-            if(config_.turn_on_ineq_constraints && config_.ineq_constraints_type == "curvature"){
-                const double maxStrAng = config_.vehicle_kinematic_constraints_max_steering_angle * (M_PI/180);   // [rad]
-                const double whlbase = config_.vehicle_kinematic_constraints_wheel_base; // [m]
-                const double kappaMax = std::tan(maxStrAng) / whlbase;
 
-                // remember x = [rx, ry, rz, tx, ty, tz]T
-                // A x <= 0
-                // [ 0 0 -l tan(-phi_max) 0 0]  
-                // [ 0 0  l -tan(phi_max) 0 0] x <= 0
-                // [ 0 0  0            -1 0 0]
-                // equivalently (for simplicity):
-                // [ 0 0 -1 -kappa_max 0 0]  
-                // [ 0 0  1 -kappa_max 0 0] x <= 0
-                // [ 0 0  0         -1 0 0]
-
-                // This means:
-                // constraintMatrix * x <= 0
-
-                // Actually, it should be:
-                // constraintMatrix * (x_qp_iter + x_total_inc) <= 0
-                // , where x_qp_iter: the latest delta_x estimation in this QP inner loop,  x_total_inc: total incremental delta_x estimation in this consecutive lidar frames so far (ICP + QP)
-                // So it should be:
-                // constraintMatrix * x_qp_iter <= -constraintMatrix * x_total_inc
-                // constraintMatrix * x_qp_iter <= Aub, where Aub = -constraintMatrix * x_total_inc
-                // Now that x is actually scaled:
-                //   constraintMatrix * D * (D^-1 x) <= Aub
-                //   constraintMatrix * D * z <= Aub, we are actually solving this z (=D^-1 x) (to be mapped back afterward)
-                //   constraintMatrix' * z <= Aub, where constraintMatrix' = constraintMatrix * D
-                // Thus, we have to scale constraintMatrix but we don't have to do that with Aub
-
-
-                constraintMatrix = Eigen::MatrixXd::Zero(3,6);
-                constraintMatrix(0,2) = -1.0;
-                constraintMatrix(0,3) = -kappaMax;
-                constraintMatrix(1,2) = 1.0;
-                constraintMatrix(1,3) = -kappaMax;
-                constraintMatrix(2,3) = -1.0;
-
-                Alb = Eigen::VectorXd::Constant(3, -std::numeric_limits<double>::max());
-
-                Eigen::Vector<double, 6> a_total_inc = T_total_inc.log();
-                Eigen::Vector<double, 6> x_total_inc;
-                x_total_inc.head<3>() = a_total_inc.tail<3>();
-                x_total_inc.tail<3>() = a_total_inc.head<3>();
-                Aub = -constraintMatrix * x_total_inc;
-
-                // we need to scale the constraintMatrix
-                if(config_.turn_on_jacobian_column_scaling_qp_active_set){
-                    constraintMatrix = constraintMatrix * D;
-                }
-            }
-
-            if (debug_print_qp_active_set_matrices_jacobian_residual){
+            if (debug_print_qp_active_set_matrices_jacobian_residual)
+            {
                 RCLCPP_INFO_STREAM(get_logger(), "A: " << A);
                 RCLCPP_INFO_STREAM(get_logger(), "b: " << b);
             }
 
-            if (debug_print_qp_active_set_matrices){
+            if (debug_print_qp_active_set_matrices)
+            {
                 RCLCPP_INFO_STREAM(get_logger(), "HQP: ");
                 RCLCPP_INFO_STREAM(get_logger(), HQP);
                 RCLCPP_INFO_STREAM(get_logger(), "hQP: ");
                 RCLCPP_INFO_STREAM(get_logger(), hQP);
                 RCLCPP_INFO_STREAM(get_logger(), "lb: " << lb);
                 RCLCPP_INFO_STREAM(get_logger(), "ub: " << ub);
+                // RCLCPP_INFO_STREAM(get_logger(), "vel: " << vel);
+                // RCLCPP_INFO_STREAM(get_logger(), "maxStrAng: " << maxStrAng);
+                // RCLCPP_INFO_STREAM(get_logger(), "minStrAng: " << minStrAng);
+                // RCLCPP_INFO_STREAM(get_logger(), "whlbase: " << whlbase);
+                // RCLCPP_INFO_STREAM(get_logger(), "maxYawRate: " << maxYawRate);
+                // RCLCPP_INFO_STREAM(get_logger(), "minYawRate: " << minYawRate);
                 RCLCPP_INFO_STREAM(get_logger(), "constraintMatrix: " << constraintMatrix);
                 RCLCPP_INFO_STREAM(get_logger(), "Alb: " << Alb);
                 RCLCPP_INFO_STREAM(get_logger(), "Aub: " << Aub);
             }
 
-            // ---- Solve Inequality Constrained QP ----
             timeLogger_.start("[SQP]: Solve QP", __FUNCTION__, __LINE__);
+
+            Eigen::VectorXd z_full(6);
+            z_full.setZero();
+
+            // Line search / outer loop parameters
+
+            const double mu             = 10.0;   // penalty on violations in merit
+            const double armijo_c       = 1e-2;   // Armijo parameter
+            const double backtrack_beta = 0.5;    // alpha <- beta * alpha
+            const int    max_backtrack  = 20;
+            const double tol_step_norm  = 1e-6;
+
+            // set solver parameters and solve
             qpmad::Solver qpmadSolver;   // Solver = SolverTemplate<double, Eigen::Dynamic, 1, Eigen::Dynamic>; in qpmad/solver.h
             qpmad::SolverParameters param;
-            param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
-            qpmad::Solver::ReturnStatus status =
-                qpmadSolver.solve(x_qp_iter, HQP, hQP, lb, ub, constraintMatrix, Alb, Aub, param);
+            // param.hessian_type_ = qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
+            // qpmad::Solver::ReturnStatus status =
+            //     qpmadSolver.solve(xQP, HQP, hQP, lb, ub, constraintMatrix, Alb, Aub, param);
+
+
             // [out] Vector primal – solution vector, mandatory, allocated if needed
             // [in,out] Matrix H – Hessian, mandatory, non-empty, factorized in-place
             // [in] Vector h – objective vector, mandatory, may be empty
@@ -3890,15 +4425,27 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             // [in] Vector Aub – upper bounds of general constraints, may be omitted (if A and Alb are present they are assumed to be equality constraints), may be empty
             // [in] SolverParameters param – solver parameters, may be omitted
 
+            std::cout << "z_full.T = [" << z_full.transpose() << "]\n";
+
+            // ----- 1) Solve the QP to get a "target" point x_qp -----
+            Eigen::VectorXd zQP = z_full; // initial guess
+            qpmad::Solver::ReturnStatus status =
+                qpmadSolver.solve(zQP, HQP, hQP, lb, ub, constraintMatrix, Alb, Aub, param);
+
+
+
             // sanity check with Cholesky Decomposition linear solver
-            if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained){
+            if (debug_try_qp_active_set_Cholesky_Decomposition_unconstrained)
+            {
                 auto H_test = HQP / 2;
                 auto h_test = - hQP / 2;
-                x_qp_iter = H_test.ldlt().solve(-h_test);
+                zQP = H_test.ldlt().solve(-h_test);
+                //xQP = H_test.ldlt().solve(-h_test);
             }
 
             // check optimization status
-            if (status != qpmad::Solver::OK){
+            if (status != qpmad::Solver::OK)
+            {
                 RCLCPP_INFO_STREAM(get_logger(), "Error in solving inequality constrained optimization problem with QPmad library.");
             }
 
@@ -3908,122 +4455,262 @@ void Frontend::solveLeastSquares_InequalityConstraints_ActiveSet()
             Eigen::Matrix<bool, Eigen::Dynamic, 1> is_lower;
             qpmadSolver.getInequalityDual(dual, indices, is_lower);
 
-            if (debug_print_qp_active_set_solution_analysis){
-                dualLogger_.recordDual(timeCurrScanBeg_, dual, indices, is_lower);
-                if (dual.size() > 0){
-                    ineqConActivated = true;
-                    timeLogger_.start("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
+            //=======================================LINE SEARCH BEGIN ===================================================
+
+            // Direction = target - current
+            Eigen::VectorXd dir = zQP - z_full;
+            double dir_norm = dir.norm();
+            std::cout << "dir norm = " << dir_norm << "\n";
+
+            if (dir_norm < tol_step_norm)
+            {
+                std::cout << "Step is tiny, stopping.\n";
+                break;
+            }
+
+            // ----- 2) Compute merit at current point and directional slope -----
+            double phi_x = merit(z_full, HQP, hQP, mu, constraintMatrix, Alb, Aub, lb, ub);
+            Eigen::VectorXd g = HQP*z_full + hQP;
+            double slope = g.dot(dir);
+
+            std::cout << "merit(x) = " << phi_x << ", slope = " << slope << "\n";
+
+            if (slope >= 0.0)
+            {
+                std::cout << "Warning: direction is not a descent direction, stopping.\n";
+                break;
+            }
+
+            // ----- 3) Backtracking line search on alpha -----
+        double alpha   = 1.0;
+        bool accepted  = false;
+
+        for (int bt = 0; bt < max_backtrack; ++bt)
+        {
+            std::cout << "  iter_cnt = " << iter_cnt << "  iter_qp = " << iter_qp <<"  bt = " << bt;
+            Eigen::VectorXd z_trial = z_full + alpha * dir;
+            double phi_trial = merit(z_trial, HQP, hQP, mu, constraintMatrix, Alb, Aub, lb, ub);
+
+            double armijo_rhs = phi_x + armijo_c * alpha * slope;
+            //double armijo_rhs = armijo_c * alpha * slope;
+
+            std::cout << "  alpha = " << alpha
+                      << ", merit(z_trial) = " << phi_trial
+                      << ", Armijo RHS = " << armijo_rhs << "\n";
+
+            if (phi_trial <= armijo_rhs)
+            {
+                // Accept step
+                z_full = z_trial;
+                accepted = true;
+                std::cout << "  Step accepted.\n";
+                break;
+            }
+            else
+            {
+                // Shrink alpha
+                alpha *= backtrack_beta;
+            }
+        }
+
+        if (!accepted)
+        {
+            std::cout << "Line search failed to find acceptable step, stopping.\n";
+            break;
+        }
+
+
+
+
+
+            if (debug_print_qp_active_set_solution_analysis)
+            {
+                if (dual.size() > 0)
+                {
                     RCLCPP_INFO_STREAM(get_logger(), "Number of active Inquality Constraints: " << dual.size());
                     RCLCPP_INFO_STREAM(get_logger(), "Do Constraints satisfied? 0 == satisfied: ");
-                    timeLogger_.stop("[SQP]: Inequality Constraints activated", __FUNCTION__, __LINE__);
-
-                    if (constraintMatrix.size() == 0) {
+                    if (constraintMatrix.size() == 0) 
+                    {
                         RCLCPP_INFO_STREAM(get_logger(), "No general constraints (A is empty).");
-                    } else if (constraintMatrix.cols() != x_qp_iter.size()) {
+                    } 
+                    //else if (constraintMatrix.cols() != xQP.size())
+                    else if (constraintMatrix.cols() != z_full.size()) 
+                    {
                         RCLCPP_WARN_STREAM(get_logger(), "Constraint matrix cols != x size.");
-                    } else {
-                        RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * x_qp_iter).transpose());
+                    } 
+                    else 
+                    {
+                        //RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * xQP).transpose());
+                        RCLCPP_INFO_STREAM(get_logger(), "A*x = " << (constraintMatrix * z_full).transpose());
                     }
+                    // std::cout << constraintMatrix*xQP << std::endl;
+                    // RCLCPP_INFO_STREAM(get_logger(), constraintMatrix*xQP);
                 }
             }
 
             // scale the solution back if necessary
-            Eigen::VectorXd z = Eigen::VectorXd::Zero(6);
-            if (config_.turn_on_jacobian_column_scaling_qp_active_set) {
-                z = x_qp_iter;
+            if (config_.turn_on_jacobian_column_scaling_qp_active_set)
+            {   
+                //Eigen::VectorXd z = xQP;
+                Eigen::VectorXd z = z_full;
                 //    z   = (D^-1 x) : scaled state vector (to be mapped back to x after solving QP)
                 // --- 5) Map back to original variables (unscale) ---
-                x_qp_iter = D * z;  // x = Dz
+                x = D * z;  // x = Dz
+            }
+            else
+            {
+                //x = xQP;
+                x = z_full;
             }
             timeLogger_.stop("[SQP]: Solve QP", __FUNCTION__, __LINE__);
 
-            // ---- Step Size Check: L-M Lambda Update ----
-            if(config_.levenberg_marquardt_trust_region_lambda_adjustment){
-                if(!config_.turn_on_jacobian_column_scaling_qp_active_set) z = x_qp_iter;
-                // Here we examine the step size, and adjust radius_(=1/lamdba_, following Ceres implementation)
-                // 1. solve the normal equation
-                // 2. compute the function decrease and step size quality
-                // 3. if step size quality is good -> widen the radius (smaller lambda) -> and go to the following step
-                //    if step size quality is bad  -> reduce the radius (larger lambda) 
-                const auto ATWA = 0.5 * HQP;
-                const auto ATWb = 0.5 * hQP;
-                const Eigen::VectorXd x0 = Eigen::VectorXd::Zero(6);
-                const double f = computeResidualWithDeltaX_OriginalObjective(x0, w);
-                const double f_delta_x = computeResidualWithDeltaX_OriginalObjective(x_qp_iter, w); // f should be based on the solution scaled back (x_qp_iter)
-                const double m = computeModelPredictedReduction(x0, ATWA, ATWb);
-                const double m_delta_x = computeModelPredictedReduction(z, ATWA, ATWb); // m (quadratic model) should be based on the solution scaled (z) because ATWA, ATWB are scaled
-                const double rho = (f - f_delta_x) / (m - m_delta_x);
+            // ------------------- TURN DETECTOR START------------------------
+            double yaw_inc_rad = x(2);                           // axis-angle rotation about z [rad]
+            double yaw_inc_deg = yaw_inc_rad * 180.0 / M_PI;     // convert to degrees
 
-                // update lambda in LM trust region depending on the step quality
-                if(rho < 0.25){     // if step size quality is bad  -> reduce the radius (larger lambda) 
-                    lm_lambda_ = 2 * lm_lambda_;
-                }else if(rho > 0.75){   // if step size quality is good -> widen the radius (smaller lambda)
-                    lm_lambda_ = std::max(lm_lambda_ / 1.414, config_.levenberg_marquardt_trust_region_lambda_min);
+            double delta_Z_m = x(5);
+
+            // First: update stats (only if finite)
+            if (std::isfinite(yaw_inc_deg))
+            {
+                double abs_yaw = std::abs(yaw_inc_deg);
+                double abs_Z = std::abs(delta_Z_m);
+
+                // initialize min/max on first iteration
+                if (config_.yaw_deg_count == 0)
+                {
+                    config_.yaw_deg_max = abs_yaw;
+                    config_.yaw_deg_min = abs_yaw;
+                    config_.Z_max = abs_Z;
+                    config_.Z_min = abs_Z;
                 }
 
-                if (debug_print_qp_levenberg_marquardt_adaptive_lambda){
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          lm_lambda : " << lm_lambda_);
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]            delta_x : " << z.transpose());
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] delta_x_scaledback : " << x_qp_iter.transpose());
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  f : " << f);
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          f_delta_x : " << f_delta_x);
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]                  m : " << m);
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]          m_delta_x : " << m_delta_x);
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration]       step quality : " << rho);
-                }
+                // update min / max
+                config_.yaw_deg_max = std::max(config_.yaw_deg_max, abs_yaw);
+                config_.yaw_deg_min = std::min(config_.yaw_deg_min, abs_yaw);
 
-                // if the step is not good, reject it and go to the next iteration
-                if(rho < config_.levenberg_marquardt_trust_region_step_quality_threshold){
-                    RCLCPP_INFO_STREAM(get_logger(), "[LM iteration] step quality: " << rho << ", current step is rejected.");
-                    continue;
+                config_.Z_max = std::max(config_.Z_max, abs_Z);
+                config_.Z_min = std::min(config_.Z_min, abs_Z);
+
+                // update running sum & count for average
+                config_.yaw_deg_sum += abs_yaw;
+                config_.Z_sum += abs_Z;
+                config_.yaw_deg_count++;
+
+                // (Optional) print stats every N steps
+                if (config_.yaw_deg_count % 20 == 0)
+                {
+                    double avg_yaw = config_.yaw_deg_sum / config_.yaw_deg_count;
+                    double avg_Z = config_.Z_sum / config_.yaw_deg_count;
+                    RCLCPP_INFO_STREAM(get_logger(),
+                        "[TURN STATS] max yaw increment =" << config_.yaw_deg_max 
+                        << " deg, min yaw increment =" << config_.yaw_deg_min
+                        << " deg, avg yaw increment =" << avg_yaw
+                        << " deg" 
+                        << " , max Z increment =" << config_.Z_max
+                        << " m, min Z increment =" << config_.Z_min
+                        << " m, avg Z increment =" << avg_Z
+                        << " m ("
+                        << config_.yaw_deg_count << " samples)");
                 }
             }
 
-            if (debug_print_qp_active_set_solution){
-                for (unsigned int i=0; i<6; ++i){
-                    RCLCPP_INFO_STREAM(get_logger(), "x_qp_iter(" << i << "): " << x_qp_iter(i));
+
+            // Sanity checks: catch NaN, Inf, or huge spikes
+            if (!std::isfinite(yaw_inc_rad) || std::abs(yaw_inc_rad) > 1.0) {  
+                RCLCPP_ERROR_STREAM(get_logger(),
+                    "❌ BAD yaw increment detected: " << yaw_inc_rad 
+                    << " rad (" << yaw_inc_deg << " deg). Possible solver/scaling issue.");
+            } 
+            else 
+            {
+                // Classify turning behavior
+                if (std::abs(yaw_inc_deg) < 0.05) {
+                    // basically straight
+                    RCLCPP_INFO_STREAM(get_logger(),
+                        "  Straight: Δyaw = " << yaw_inc_deg << " deg");
+                } 
+                else if (std::abs(yaw_inc_deg) < 0.5) {
+                    // small adjustment
+                    RCLCPP_INFO_STREAM(get_logger(),
+                        "  Slight turn: Δyaw = " << yaw_inc_deg << " deg");
+                } 
+                else if (std::abs(yaw_inc_deg) < 2.0) {
+                    // real turning
+                    RCLCPP_WARN_STREAM(get_logger(),
+                        "  Turning: Δyaw = " << yaw_inc_deg << " deg");
+                } 
+                else {
+                    // sharp turn approaching constraint
+                    RCLCPP_ERROR_STREAM(get_logger(),
+                        "  SHARP TURN: Δyaw = " << yaw_inc_deg << " deg");
+                }
+            }
+            // --------------------------TURN DETECTOR END---------------------------------
+
+
+            if (debug_print_qp_active_set_solution)
+            {
+                // for (unsigned int i=0; i<6; ++i)
+                // {
+                //     RCLCPP_INFO_STREAM(get_logger(), "xQP(" << i << "): " << xQP(i));
+                // }
+                // for (unsigned int i=0; i<6; ++i)
+                // {
+                //     RCLCPP_INFO_STREAM(get_logger(), "xQPfloat(" << i << "): " << xQPfloat(i));
+                // }
+                for (unsigned int i=0; i<6; ++i)
+                {
+                    RCLCPP_INFO_STREAM(get_logger(), "x(" << i << "): " << x(i));
                 }
             }
 
-            // ---- Pose Increment Update in QP + ICP so far ----
-            Eigen::Vector<double, 6> a_qp_iter;
-            a_qp_iter.tail<3>() = x_qp_iter.head<3>(); // axis-angle vector (alpha, beta, gamma)
-            a_qp_iter.head<3>() = x_qp_iter.tail<3>(); // translation vector (x,y,z)
-            const Sophus::SE3d exp_x_qp_iter = Sophus::SE3d::exp(a_qp_iter);
+            timeLogger_.start("[SQP]: Update solution pose", __FUNCTION__, __LINE__);
 
-            T_total_inc = T_total_inc * exp_x_qp_iter;
+            // Map state vector x (6DoF) to a transformation matrix via exp map in Sophus
+            // reorder the state vector to adjust to Sophus twist 
+            Eigen::Vector<double, 6> a;
+            a.tail<3>() = x.head<3>(); // axis-angle vector (alpha, beta, gamma)
+            a.head<3>() = x.tail<3>(); // translation vector (x,y,z)
+            const Sophus::SE3d exp_x = Sophus::SE3d::exp(a);
+            Sophus::SE3d T(q_w_bCurrKf_.toRotationMatrix(), t_w_bCurrKf_);
 
-            if (debug_print_qp_active_set_solution_pose_update){
-                // RCLCPP_INFO_STREAM(get_logger(), "T_total_inc: " << T_total_inc);
+            if (config_.pose_increment_multiplication == "right")
+            {
+                T = T * exp_x; // update by right multiplication
+            }
+            else if (config_.pose_increment_multiplication == "left")
+            {
+                T = exp_x * T; // update by left multiplication
+            }
+            else
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
             }
 
-        } // End: iterative QP inner iteration
+            q_w_bCurrKf_ = Eigen::Quaterniond(T.rotationMatrix());
+            q_w_bCurrKf_.normalize();
+            t_w_bCurrKf_ = T.translation();
+            timeLogger_.stop("[SQP]: Update solution pose", __FUNCTION__, __LINE__);
 
-        // ---- Sensor Pose in world frame Update in ICP for new point-plane correspondance computation ----
-        T_w_bCurrKf_icp = T_icp_init * T_total_inc;
-        if (config_.pose_increment_multiplication == "right"){
-            T_w_bCurrKf_icp = T_icp_init * T_total_inc; // update by right multiplication
-        } else if (config_.pose_increment_multiplication == "left"){
-            T_w_bCurrKf_icp = T_total_inc * T_icp_init; // update by left multiplication
-        } else {
-            RCLCPP_INFO_STREAM(get_logger(), "Left or Right Pose Update is not defined. Current Pose is not updated.");
-        }
+            if (debug_print_qp_active_set_solution_pose_update)
+            {
+                RCLCPP_INFO_STREAM(get_logger(), "t_delta: " << exp_x.translation());
+                RCLCPP_INFO_STREAM(get_logger(), "q_delta: " << Eigen::Quaterniond(exp_x.rotationMatrix()));
+                RCLCPP_INFO_STREAM(get_logger(), "t_w_bCurrKf_: " << t_w_bCurrKf_.transpose());
+                RCLCPP_INFO_STREAM(get_logger(), "q_w_bCurrKf_: " << q_w_bCurrKf_);
+            }
 
-        // The pose update should be outside the icp-qp loop (to be corrected)
-        q_w_bCurrKf_ = Eigen::Quaterniond(T_w_bCurrKf_icp.rotationMatrix()).normalized();
-        t_w_bCurrKf_ = T_w_bCurrKf_icp.translation();
+        } // QP inner iteration (SQP)
 
-    } // End: icp iteration
+        pointScanCurrInBForResidual_.clear();
+        planeNormalForResidual_.clear();
+        planeDistFromOriginForResidual_.clear();
 
-    // log time
-    if(ineqConActivated){
-        ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, true);
-    } else {
-        ineqConstLogger_.recordInequalityConstraints(timeCurrScanBeg_, false);
     }
-
     // end of the point-to-plane icp with inequality constraints
 }
+
 
 void Frontend::solveLeastSquares_InequalityConstraints_BFGS()
 {
